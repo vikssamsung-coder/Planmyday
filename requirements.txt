@@ -1,0 +1,14 @@
+streamlit>=1.30
+pandas>=2.0
+openpyxl>=3.1
+python-docx>=1.1
+filelock>=3.12
+openai>=1.0
+streamlit-option-menu>=0.3.6
+streamlit-mic-recorder>=0.0.8
+anthropic>=0.39
+selenium>=4.15
+gspread>=6.0
+google-auth>=2.20
+google-api-python-client>=2.100
+streamlit-autorefresh>=1.0.1
