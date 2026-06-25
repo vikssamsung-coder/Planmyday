@@ -256,8 +256,57 @@ def _users_path():
     return os.path.join(_common_dir(), "users_master.xlsx")
 
 
+def _secrets_users():
+    """Read optional [[users]] blocks from Streamlit secrets, returned as a list of dicts.
+    This lets logins be defined directly in secrets (durable on Streamlit Cloud) in
+    addition to the users sheet. Safe if secrets or the block is absent."""
+    try:
+        import streamlit as st
+        rows = st.secrets.get("users", [])
+    except Exception:
+        return []
+    out = []
+    for r in rows or []:
+        try:
+            out.append(dict(r))
+        except Exception:
+            continue
+    return out
+
+
 def get_users():
-    return _read(_users_path(), schemas.USERS)
+    """All logins, merged from the users sheet AND any [[users]] in Streamlit secrets.
+    - user_key is normalised to lowercase (so it matches the lowercased login input).
+    - On a user_key collision, secrets win, overlaying only the fields they specify onto
+      the sheet row (fields omitted in secrets keep the sheet value).
+    - A user with no `active` value defaults to active ("Yes")."""
+    import pandas as pd
+    sheet = _read(_users_path(), schemas.USERS)
+    merged = {}
+    if not sheet.empty:
+        for _, r in sheet.iterrows():
+            uk = str(r.get("user_key", "") or "").strip().lower()
+            if not uk:
+                continue
+            row = {c: r.get(c, "") for c in schemas.USERS}
+            row["user_key"] = uk
+            merged[uk] = row
+    for u in _secrets_users():
+        uk = str(u.get("user_key", "") or "").strip().lower()
+        if not uk:
+            continue
+        base = merged.get(uk, {c: "" for c in schemas.USERS})
+        for c in schemas.USERS:
+            v = u.get(c, None)
+            if v not in (None, ""):
+                base[c] = v
+        base["user_key"] = uk
+        if not str(base.get("active", "") or "").strip():
+            base["active"] = "Yes"
+        merged[uk] = base   # secrets override the sheet
+    if not merged:
+        return pd.DataFrame(columns=schemas.USERS)
+    return pd.DataFrame(list(merged.values()), columns=schemas.USERS)
 
 
 DEMO_USERS = {
@@ -277,21 +326,58 @@ DEMO_USERS = {
 
 
 def get_user(user_key):
+    uk = str(user_key or "").strip().lower()
     df = get_users()
-    row = df[df["user_key"] == user_key] if not df.empty else df
-    if not row.empty:
-        return row.iloc[0].to_dict()
-    return DEMO_USERS.get(user_key)   # fallback so demo logins work even if not seeded
+    if not df.empty:
+        row = df[df["user_key"] == uk]
+        if not row.empty:
+            return row.iloc[0].to_dict()
+        return None   # users are configured (sheet/secrets) but this isn't one of them
+    return DEMO_USERS.get(uk)   # nothing configured yet -> allow demo logins
+
+
+def hash_password(password, salt=None):
+    """Return a salted PBKDF2-SHA256 hash string: 'pbkdf2$<iterations>$<salt_hex>$<hash_hex>'.
+    A random 16-byte salt is generated if none is given. Store this string as the user's
+    password; the plaintext is never kept."""
+    import hashlib
+    import os as _os
+    iterations = 200_000
+    if salt is None:
+        salt = _os.urandom(16)
+    elif isinstance(salt, str):
+        salt = bytes.fromhex(salt)
+    dk = hashlib.pbkdf2_hmac("sha256", str(password).encode("utf-8"), salt, iterations)
+    return f"pbkdf2${iterations}${salt.hex()}${dk.hex()}"
+
+
+def verify_password(password, stored):
+    """Check a typed password against a stored value. Supports the salted hash format
+    above; also accepts a legacy PLAINTEXT value (so existing logins keep working until
+    their passwords are re-hashed). Uses a constant-time compare for the hash path."""
+    import hashlib
+    import hmac
+    stored = str(stored or "")
+    if stored.startswith("pbkdf2$"):
+        try:
+            _, iters, salt_hex, hash_hex = stored.split("$", 3)
+            dk = hashlib.pbkdf2_hmac("sha256", str(password).encode("utf-8"),
+                                     bytes.fromhex(salt_hex), int(iters))
+            return hmac.compare_digest(dk.hex(), hash_hex)
+        except Exception:
+            return False
+    # legacy plaintext fallback (re-hash these when convenient)
+    return bool(stored) and str(password) == stored
 
 
 def authenticate(user_key, password):
     """Verify a login. Returns the user dict on success, else None.
-    Login ID = user_key (username); password is checked against the stored password."""
+    Login ID = user_key (username); the password is checked against the stored hash
+    (salted PBKDF2) — or a legacy plaintext value if that user hasn't been migrated yet."""
     u = get_user(user_key)
     if not u or str(u.get("active", "Yes")) != "Yes":
         return None
-    stored = str(u.get("password", "") or "")
-    if stored and str(password) == stored:
+    if verify_password(password, u.get("password", "")):
         return u
     return None
 
