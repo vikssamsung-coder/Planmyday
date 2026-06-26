@@ -13,6 +13,8 @@ _CSS = """
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
 
 :root{
+  color-scheme: only light;   /* tell the OS/browser this app is light-only -> stops
+                                 mobile auto-dark from inverting cards & washing out text */
   --ink:#1B2733; --ink-soft:#5C6B7A; --line:#E7E3DC;
   --canvas:#F6F4F0; --card:#FFFFFF;
   --slate:#2D4A5E; --slate-d:#22394A;
@@ -25,7 +27,7 @@ _CSS = """
 .stApp{ background:
   radial-gradient(1200px 400px at 100% -5%, #FBEFE2 0%, rgba(251,239,226,0) 60%),
   var(--canvas); }
-html, body, [class*="css"]{ font-family:'Inter',system-ui,sans-serif; color:var(--ink); }
+html, body, [class*="css"]{ font-family:'Inter',system-ui,sans-serif; color:var(--ink); color-scheme: only light; }
 [data-testid="stHeader"]{ background:transparent; }
 [data-testid="stToolbar"]{ display:none; }
 #MainMenu, footer{ visibility:hidden; }
@@ -140,6 +142,36 @@ hr{ border-color:var(--line); margin:1.1rem 0; }
   max-width:80%; line-height:1.45; }
 .pmd-hero .quote .by{ display:block; font-style:normal; font-weight:600; font-size:.74rem;
   letter-spacing:.06em; text-transform:uppercase; color:#F2B36B; margin-top:8px; }
+
+/* ---- keep text readable on mobile when the phone is in DARK MODE ----
+   The app's cards are always white, but a phone in dark mode makes Streamlit/components
+   render light-coloured text -> light text on a white card = invisible. Force the dark
+   ink palette to stick regardless of the device's colour scheme. */
+@media (prefers-color-scheme: dark){
+  html, body, .stApp, [class*="css"]{ color:#1B2733 !important; }
+  /* all markdown / labels / list / paragraph text inside the app and its cards */
+  [data-testid="stMarkdownContainer"],
+  [data-testid="stMarkdownContainer"] *,
+  [data-testid="stExpander"] *,
+  [data-testid="stVerticalBlockBorderWrapper"] *,
+  .stMarkdown, .stText, p, li, span, label,
+  [data-testid="stWidgetLabel"], [data-testid="stWidgetLabel"] *{
+    color:#1B2733 !important;
+  }
+  h1,h2,h3,h4,h5,h6{ color:#1B2733 !important; }
+  .stCaption, [data-testid="stCaptionContainer"], [data-testid="stCaptionContainer"] *{
+    color:#5C6B7A !important;   /* soft grey captions stay grey, still readable on white */
+  }
+  /* inputs / selects: keep dark text on their light fields */
+  input, textarea, [data-baseweb="select"] *{ color:#1B2733 !important; }
+  /* the dark hero banner and primary buttons keep their own white text */
+  .pmd-hero, .pmd-hero *{ color:#fff !important; }
+  .pmd-hero .tagline{ color:#CFE0EA !important; }
+  .pmd-hero .quote .by, .pmd-hero .eyebrow{ color:#F2B36B !important; }
+  .stButton > button[kind="primary"], [data-testid="baseButton-primary"]{ color:#fff !important; }
+  /* nav selected pill keeps white text on its dark background */
+  .nav-link-selected, .nav-link-selected *{ color:#fff !important; }
+}
 </style>
 """
 

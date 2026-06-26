@@ -191,14 +191,34 @@ def _parse_json(text):
         raise
 
 
+_ROLE_BRIEF = ""   # the current user's role objective; set once per request by the app
+
+
+def set_role_brief(text):
+    """Set the role objective that will be injected into EVERY AI call this request —
+    tasks, nudges, the daily quote, KRA reminders, message-writing, summaries, all of it.
+    Called by the app once the logged-in user (and their role) is known."""
+    global _ROLE_BRIEF
+    _ROLE_BRIEF = str(text or "").strip()
+
+
+def _role_block():
+    if not _ROLE_BRIEF:
+        return ""
+    return ("\n\n---\n\n# THE PERSON'S ROLE & OBJECTIVE — apply this to EVERYTHING you produce\n"
+            "Everything below — every task, nudge, the morning quote, KRA reminder, message, "
+            "summary, or suggestion — must serve this person's role and its objective. Keep "
+            "this objective in mind in every word of every response.\n\n" + _ROLE_BRIEF)
+
+
 def _chat_json(system, user_obj, max_tokens=1400):
     """Provider-agnostic JSON chat. Prefers OpenAI (if its key is set), falls back
     to Anthropic (Claude). Returns a parsed dict. Raises if neither works.
 
-    Every call inherits the MASTER system prompt (the companion's constitution),
-    then the function-specific `system` instructions on top.
+    Every call inherits the MASTER system prompt (the companion's constitution) AND the
+    current user's ROLE objective, then the function-specific `system` instructions on top.
     """
-    system = master_system() + "\n\n---\n\n" + system
+    system = master_system() + _role_block() + "\n\n---\n\n" + system
     user_str = user_obj if isinstance(user_obj, str) else json.dumps(user_obj)
     last_err = None
 

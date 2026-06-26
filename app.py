@@ -149,7 +149,7 @@ def mis_dashboard(user):
                     st.markdown(f"**{status_color(s['status'])} {s['kpi_name']}**")
                     st.markdown(
                         f"<span style='font-size:1.4rem;font-weight:600'>{s['achieved_mtd']:,.0f}</span>"
-                        f"<span style='color:#888'> / {s['monthly_target']:,.0f} {s['target_unit']}</span>",
+                        f"<span style='color:#6B7480'> / {s['monthly_target']:,.0f} {s['target_unit']}</span>",
                         unsafe_allow_html=True)
                     st.caption(f"{s['achievement_pct']}% vs {s['expected_pct']}% exp · "
                                f"gap {s['gap']:,.0f} · need {s['required_run_rate']:,.0f}/day")
@@ -214,7 +214,7 @@ def render_daily_targets(user):
                         st.markdown(f"<span style='font-size:1.3rem;font-weight:600'>{g['target_number']}</span>",
                                     unsafe_allow_html=True)
                     else:
-                        st.markdown("<span style='color:#bbb'>— empty —</span>", unsafe_allow_html=True)
+                        st.markdown("<span style='color:#6B7480'>— empty —</span>", unsafe_allow_html=True)
                         st.caption("tap Edit")
     return headings
 
@@ -797,11 +797,31 @@ def _buzzer(uk, user):
     for t in due:
         storage.mark_buzzed(uk, t["task_id"])   # stamp so the 5-min re-nag clock starts
     names = ", ".join(t["title"] for t in due[:3])
-    st.error(f"🔔 **Reminder — action needed now:** {names}"
-             + (f"  (+{len(due)-3} more)" if len(due) > 3 else "")
-             + "  \nOpen the task below and post an update to stop the buzzer.")
+    more = f"  ·  +{len(due)-3} more" if len(due) > 3 else ""
 
-    # video buzzer (plays once, muted-autoplay to satisfy browser autoplay rules)
+    # Prominent FLASHING banner — a CSS animation so it grabs attention on every device
+    # without depending on a media file (mobile/Cloud block autoplay audio anyway).
+    st.markdown(f"""
+    <style>
+    @keyframes pmdBuzz {{
+      0%,100%{{ background:#D9544D; box-shadow:0 0 0 0 rgba(217,84,77,.55); }}
+      50%{{ background:#A8352E; box-shadow:0 0 0 12px rgba(217,84,77,0); }}
+    }}
+    .pmd-buzzer{{
+      animation:pmdBuzz 1s ease-in-out infinite;
+      color:#fff !important; border-radius:12px; padding:14px 18px; margin:4px 0 14px;
+      font-weight:700; font-size:1.02rem; border:2px solid rgba(255,255,255,.35);
+    }}
+    .pmd-buzzer .sub{{ font-weight:500; font-size:.85rem; opacity:.96; display:block;
+      margin-top:5px; color:#fff !important; }}
+    </style>
+    <div class="pmd-buzzer">🔔 Reminder — action needed now: {names}{more}
+      <span class="sub">Open the task below and post an update to stop the buzzer.</span>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # Optional sound/clip: muted video if a clip exists (plays visually), else attempt a
+    # short beep (may be blocked by autoplay rules — the flashing banner is the reliable cue).
     import paths, os as _os
     vid = _os.path.join(paths.base_dir(), "_common", "buzzer.mp4")
     if _os.path.exists(vid):
@@ -810,7 +830,6 @@ def _buzzer(uk, user):
         except TypeError:
             st.video(vid)   # older Streamlit without autoplay arg
     else:
-        # audio fallback beep via HTML if no video file present
         st.markdown(
             "<audio autoplay><source src='https://actions.google.com/sounds/v1/alarms/"
             "beep_short.ogg' type='audio/ogg'></audio>", unsafe_allow_html=True)
@@ -1190,7 +1209,7 @@ def _monthly_scorecard(uk, targets):
   <div style="font-weight:700;font-size:.92rem;color:#1B2733;">{r['kpi_name']}</div>
   <div style="margin:6px 0 2px;">
     <span style="font-size:1.6rem;font-weight:800;letter-spacing:-.02em;">{ach:,.0f}</span>
-    <span style="color:#8A93A0;font-size:.9rem;"> / {tgt:,.0f}</span>
+    <span style="color:#6B7480;font-size:.9rem;"> / {tgt:,.0f}</span>
   </div>
   <div style="background:#EEE9E1;border-radius:999px;height:8px;overflow:hidden;margin:8px 0 6px;">
     <div style="width:{pct}%;height:100%;background:{color};border-radius:999px;"></div>
@@ -1199,7 +1218,7 @@ def _monthly_scorecard(uk, targets):
     <span>{s['achievement_pct']}%</span>
     <span style="color:{color};font-weight:600;">{s['status']}</span>
   </div>
-  <div style="font-size:.72rem;color:#8A93A0;margin-top:4px;">
+  <div style="font-size:.72rem;color:#6B7480;margin-top:4px;">
     gap {s['gap']:,.0f} · need {s['required_run_rate']:,.0f}/day
   </div>
 </div>""", unsafe_allow_html=True)
@@ -1526,10 +1545,12 @@ def _directory_section(user):
 
     def _chip_color(text):
         import hashlib
-        palette = ["#5367FC", "#00B894", "#E17055", "#0984E3", "#6C5CE7",
-                   "#00897B", "#D63384", "#F39C12", "#16A085"]
+        # darker palette so the saturated colour is readable as small chip text on its
+        # light tint (bright colours like orange/teal fail contrast otherwise)
+        palette = ["#3B4FE0", "#047857", "#A0381E", "#0768B3", "#5B4BD6",
+                   "#00695C", "#C2185B", "#8A5200", "#0A6B57"]
         if not text:
-            return "#9AA0A6"
+            return "#5C6B7A"
         h = int(hashlib.md5(str(text).encode()).hexdigest(), 16)
         return palette[h % len(palette)]
 
@@ -1807,7 +1828,7 @@ def _learn_accepted(uk):
     for topic, grp in acc.groupby("topic"):
         st.markdown(f"##### {topic}")
         for _, lr in grp.iterrows():
-            st.markdown(f"- {lr['text']}  \n  <span style='color:#8A93A0;font-size:.8rem'>"
+            st.markdown(f"- {lr['text']}  \n  <span style='color:#6B7480;font-size:.8rem'>"
                         f"since {lr['date']}</span>", unsafe_allow_html=True)
     sup = storage.get_learnings(uk, status="superseded")
     if not sup.empty:
@@ -1903,6 +1924,11 @@ def main():
         return
     user = st.session_state.user
     is_lead = user.get("login_role") == "lead" or user.get("role") == "lead"
+
+    # Inject THIS user's role objective into every AI call this request — so the daily
+    # quote, task suggestions, nudges, KRA reminders, message-writing, and summaries are
+    # all shaped by the role's goal. (Must run before the quote is generated below.)
+    ai.set_role_brief(storage.read_role_prompt(user.get("role", ""), user["user_key"]))
 
     # periodic backup: push local files to Google Sheets every ~30 min while the app is open
     _maybe_backup(user["user_key"])
