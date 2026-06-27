@@ -1736,3 +1736,91 @@ def mark_day_closed(user_key, date):
 def is_day_closed(user_key, date):
     df = _read(_closed_days_path(user_key), schemas.CLOSED_DAYS)
     return (not df.empty) and (df["date"] == date).any()
+
+
+# ---------------------------------------------------------------- step memory (reuse)
+
+def _step_templates_path(user_key):
+    return os.path.join(_user_dir(user_key), "step_templates.xlsx")
+
+
+def _norm_title(s):
+    import re
+    return re.sub(r"[^a-z0-9 ]", "", (s or "").lower()).strip()
+
+
+def save_step_template(user_key, topic, task_title, steps):
+    """Remember the steps the USER used for a task (keyed by topic + title), so a similar
+    future task can reuse the person's own approach. Latest wins per (topic, title)."""
+    texts = []
+    for s in steps or []:
+        t = s.get("text") if isinstance(s, dict) else str(s)
+        if str(t).strip():
+            texts.append(str(t).strip())
+    if not texts:
+        return
+    df = _read(_step_templates_path(user_key), schemas.STEP_TEMPLATES)
+    nt = _norm_title(task_title)
+    if not df.empty:
+        keep = ~((df["topic"] == (topic or "")) & (df["task_title"].apply(_norm_title) == nt))
+        df = df[keep]
+    row = {"template_id": f"{user_key}_stp{len(df)+1:05d}", "user_key": user_key,
+           "topic": topic or "", "task_title": task_title or "",
+           "steps_json": _json.dumps(texts), "source": "user", "updated_at": _now()}
+    df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
+    _write(_step_templates_path(user_key), df, schemas.STEP_TEMPLATES)
+
+
+def find_step_template(user_key, topic, task_title):
+    """Find the person's most relevant past steps for a similar task. Matches on topic, then
+    ranks by title word-overlap. Returns (steps_list, matched_title) or ([], '')."""
+    df = _read(_step_templates_path(user_key), schemas.STEP_TEMPLATES)
+    if df.empty:
+        return [], ""
+    target = set(_norm_title(task_title).split())
+
+    def _ov(r):
+        return len(target & set(_norm_title(r["task_title"]).split()))
+
+    cand = df.copy()
+    cand["_ov"] = cand.apply(_ov, axis=1)
+    cand["_same_topic"] = (cand["topic"] == (topic or "")).astype(int)
+    cand = cand.sort_values(["_same_topic", "_ov", "updated_at"],
+                            ascending=[False, False, False])
+    best = cand.iloc[0]
+    # require real relevance: same topic, or at least one shared title word
+    if best["_same_topic"] == 1 or best["_ov"] >= 1:
+        try:
+            return _json.loads(best["steps_json"]), best["task_title"]
+        except Exception:
+            return [], ""
+    return [], ""
+
+
+# ---------------------------------------------------------------- nudge popup cap
+
+def _popup_counts_path(user_key):
+    return os.path.join(_user_dir(user_key), "popup_counts.xlsx")
+
+
+def get_popup_count(user_key, date):
+    df = _read(_popup_counts_path(user_key), schemas.POPUP_COUNTS)
+    if df.empty:
+        return 0
+    row = df[df["date"] == date]
+    if row.empty:
+        return 0
+    try:
+        return int(row.iloc[0]["count"])
+    except Exception:
+        return 0
+
+
+def bump_popup_count(user_key, date):
+    df = _read(_popup_counts_path(user_key), schemas.POPUP_COUNTS)
+    cur = get_popup_count(user_key, date)
+    df = df[df["date"] != date] if not df.empty else df
+    df = pd.concat([df, pd.DataFrame([{"date": date, "user_key": user_key,
+                                       "count": str(cur + 1)}])], ignore_index=True)
+    _write(_popup_counts_path(user_key), df, schemas.POPUP_COUNTS)
+    return cur + 1

@@ -174,3 +174,10 @@ DSR_LOG = ["date", "user_key", "report_text", "created_at"]
 # Days the user has explicitly closed (via Close My Day → download report). Drives the
 # "close your previous day first" gate.
 CLOSED_DAYS = ["date", "user_key", "closed_at"]
+
+# Steps the USER wrote/edited for a task — remembered and reused for similar future tasks.
+STEP_TEMPLATES = ["template_id", "user_key", "topic", "task_title", "steps_json",
+                  "source", "updated_at"]
+
+# How many nudge popups have been shown to the user on a given day (cap = 4/day).
+POPUP_COUNTS = ["date", "user_key", "count"]

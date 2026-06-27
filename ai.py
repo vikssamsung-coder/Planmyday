@@ -211,6 +211,29 @@ def _role_block():
             "this objective in mind in every word of every response.\n\n" + _ROLE_BRIEF)
 
 
+_LEARN_BRIEF = ""   # the person's accepted learnings + behaviour; set once per request
+
+
+def set_learnings_brief(text):
+    """Set the person's accepted learnings (and observed behaviour/preferences) to inject
+    into EVERY AI call this request — so nudges, next-actions, the quote, task cues and
+    messages reflect what this person has learned and how they like to work. Called by the
+    app once per request alongside set_role_brief."""
+    global _LEARN_BRIEF
+    _LEARN_BRIEF = str(text or "").strip()
+
+
+def _learn_block():
+    if not _LEARN_BRIEF:
+        return ""
+    return ("\n\n---\n\n# WHAT THIS PERSON HAS LEARNED & HOW THEY WORK — use it to personalise\n"
+            "These are lessons this person has accepted about how to work better toward their "
+            "goals, plus how they like to operate. USE them: shape nudges and the next action "
+            "around them, lead with them where relevant, remember their behaviour and keep them "
+            "engaged. Do not contradict an accepted learning. Prefer the person's own way of "
+            "doing things.\n\n" + _LEARN_BRIEF)
+
+
 def _chat_json(system, user_obj, max_tokens=1400):
     """Provider-agnostic JSON chat. Prefers OpenAI (if its key is set), falls back
     to Anthropic (Claude). Returns a parsed dict. Raises if neither works.
@@ -218,7 +241,7 @@ def _chat_json(system, user_obj, max_tokens=1400):
     Every call inherits the MASTER system prompt (the companion's constitution) AND the
     current user's ROLE objective, then the function-specific `system` instructions on top.
     """
-    system = master_system() + _role_block() + "\n\n---\n\n" + system
+    system = master_system() + _role_block() + _learn_block() + "\n\n---\n\n" + system
     user_str = user_obj if isinstance(user_obj, str) else json.dumps(user_obj)
     last_err = None
 
@@ -428,18 +451,26 @@ def _role_step_fallback(task_title):
     return [f"Prepare for: {task_title}", f"Do: {task_title}", "Log the result / outcome"]
 
 
-def break_into_steps(task_title, day_goal="", role_prompt=""):
-    """Return a list of step strings for a task, reasoned from the role. Falls back
-    to a role-shaped skeleton without a key."""
+def break_into_steps(task_title, day_goal="", role_prompt="", past_steps=None):
+    """Return a list of step strings for a task, reasoned from the role. If the user has
+    PAST steps for a similar task, strongly prefer their own approach. Falls back to a
+    role-shaped skeleton without a key."""
     if not have_key():
-        return _role_step_fallback(task_title)
+        return [str(s) for s in past_steps][:8] if past_steps else _role_step_fallback(task_title)
     try:
         ctx = {"task": task_title, "goal": day_goal, "role_prompt": (role_prompt or "")[:3000]}
+        if past_steps:
+            ctx["user_past_steps_for_similar_task"] = list(past_steps)
+            ctx["how_to_use_past_steps"] = (
+                "The user has done a SIMILAR task before using these exact steps. Strongly "
+                "prefer the user's own approach: adapt these steps to the current task, keep "
+                "their wording, ordering and style, and only change what the new task "
+                "genuinely requires. Do not replace them with a generic template.")
         data = _chat_json(STEPS_SYSTEM, ctx)
         steps = data.get("steps", []) if isinstance(data, dict) else []
         return [s for s in steps if str(s).strip()][:6] or [task_title]
     except Exception:
-        return _role_step_fallback(task_title)
+        return [str(s) for s in past_steps][:8] if past_steps else _role_step_fallback(task_title)
 
 
 TRANSCRIBE_MODEL = os.environ.get("OPENAI_TRANSCRIBE_MODEL", "gpt-4o-mini-transcribe")
@@ -852,3 +883,72 @@ def daily_quote(seed=""):
     import hashlib
     idx = int(hashlib.md5((seed or "x").encode()).hexdigest(), 16) % len(_QUOTE_FALLBACK)
     return _QUOTE_FALLBACK[idx]
+
+
+FOLLOWUP_DETECT_SYSTEM = """You read a person's daily work log and find any FUTURE commitment
+— something they said they will do, or need to do, on a specific upcoming day. Examples:
+"meet Rohit next Thursday", "call the partner tomorrow", "follow up on the 15th", "review
+with Anil next week", "send the deck day after".
+
+You are given today's date and weekday. Resolve any relative date ("next Thursday",
+"tomorrow", "day after tomorrow", "next week", "this Friday") to an ABSOLUTE calendar date
+(YYYY-MM-DD) that is AFTER today. If a weekday is named, choose the NEXT occurrence of that
+weekday strictly after today.
+
+Return STRICT JSON:
+{"has_followup": true or false,
+ "date": "YYYY-MM-DD" or "",
+ "what": "short description of what to do / follow up on",
+ "who": "person or partner name if mentioned, else empty"}
+
+Set has_followup true ONLY if there is a clear future action with a date you can resolve. If
+there are several, pick the single most important. If there is no future action or no
+resolvable date, return has_followup false."""
+
+
+def detect_followup_from_log(transcript, today_date):
+    """Scan a daily-log transcript for a future commitment with a date (e.g. 'next Thursday')
+    and return {has_followup, date(YYYY-MM-DD), what, who}. Resolves relative dates against
+    today_date. Returns {'has_followup': False} when nothing is found or without a key."""
+    if not have_key() or not (transcript or "").strip():
+        return {"has_followup": False}
+    try:
+        from datetime import datetime as _dt
+        wd = _dt.strptime(today_date, "%Y-%m-%d").strftime("%A")
+        ctx = {"today": today_date, "weekday": wd, "log": transcript[:4000]}
+        d = _chat_json(FOLLOWUP_DETECT_SYSTEM, ctx, max_tokens=300)
+        if not isinstance(d, dict) or not d.get("has_followup"):
+            return {"has_followup": False}
+        dd = (d.get("date") or "").strip()
+        try:
+            parsed = _dt.strptime(dd, "%Y-%m-%d").date()
+            today = _dt.strptime(today_date, "%Y-%m-%d").date()
+        except Exception:
+            return {"has_followup": False}
+        if parsed <= today:          # must be in the future
+            return {"has_followup": False}
+        return {"has_followup": True, "date": dd,
+                "what": (d.get("what") or "").strip(),
+                "who": (d.get("who") or "").strip()}
+    except Exception:
+        return {"has_followup": False}
+
+
+NUDGE_SYSTEM = """You are the person's companion coach. Give ONE short, warm, specific nudge
+(1-2 sentences) to help them win today. If something they've LEARNED works for them is
+relevant, lead with it ("last time X worked — do that again"). Tie it to their goal and make
+it actionable. Talk like a friend who wants them to win — not corporate, no lists, no headings.
+Return STRICT JSON: {"nudge": "..."}"""
+
+
+def daily_nudge(open_tasks=None, day_goals=None):
+    """One short, personalised nudge for a popup. Reflects the person's role + accepted
+    learnings (both injected into every call). Returns '' without a key or on error."""
+    if not have_key():
+        return ""
+    try:
+        ctx = {"open_tasks": (open_tasks or [])[:12], "day_goals": (day_goals or [])[:8]}
+        d = _chat_json(NUDGE_SYSTEM, ctx, max_tokens=160)
+        return (d.get("nudge") or "").strip() if isinstance(d, dict) else ""
+    except Exception:
+        return ""

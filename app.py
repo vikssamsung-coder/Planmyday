@@ -125,8 +125,15 @@ def login_view():
 
 @st.cache_data(show_spinner=False)
 def _baby_gif_uri():
-    """Load the 'guess who's coming' GIF from assets and return a data URI (self-contained,
-    so it works on Streamlit Cloud with no static-file setup). Cached after first read."""
+    """Return the 'guess who's coming' GIF as a data URI. Uses the GIF embedded in
+    assets_data.py first (so it rides along with the .py files and never goes missing),
+    falling back to the assets/baby.gif file if the module isn't present."""
+    try:
+        import assets_data
+        if getattr(assets_data, "BABY_GIF_B64", ""):
+            return "data:image/gif;base64," + assets_data.BABY_GIF_B64
+    except Exception:
+        pass
     import base64, os
     p = os.path.join(os.path.dirname(__file__), "assets", "baby.gif")
     try:
@@ -710,6 +717,20 @@ def _task_card(uk, t, headings, role_prompt=""):
         bits.append(f"📞 {t['followup_for']}")
     label = "  ·  ".join(bits)
 
+    # gist line — a short, always-visible summary of what this task is about
+    cue = ""
+    try:
+        cue = (t["coach_cue"] or "").strip()
+    except Exception:
+        cue = ""
+    if t["source"] == "follow_up" and t["followup_for"]:
+        ff = f"Follow up with {t['followup_for']}"
+        gist = f"{ff} — {cue}" if cue else ff
+    else:
+        gist = cue
+    if gist:
+        st.caption(f"💡 {gist[:110]}")
+
     with st.expander(label, expanded=False):
         # goal dropdown — populated from today's targets + explicit no-goal
         choices = headings + ["— no goal (just needed) —"]
@@ -842,6 +863,9 @@ def _task_card(uk, t, headings, role_prompt=""):
                     new_texts = ai.edit_steps(t["title"], cur_texts, instr, t["day_goal"], role_prompt)
                     new_steps = [{"text": x, "done": done_map.get(x, False)} for x in new_texts]
                     storage.set_task_steps(uk, t["task_id"], new_steps)
+                    # remember the user-curated steps for similar future tasks
+                    topic = storage._topic_of(t["day_goal"], t.get("category", ""))
+                    storage.save_step_template(uk, topic, t["title"], new_texts)
                     for i in range(len(steps)):
                         st.session_state.pop(f"step_{t['task_id']}_{i}", None)
                     storage.sync_task_from_steps(uk, t["task_id"])
@@ -861,11 +885,14 @@ def _task_card(uk, t, headings, role_prompt=""):
             if b[1].button("✏️ Edit", key=f"edit_{t['task_id']}", use_container_width=True):
                 st.session_state[f"editing_{t['task_id']}"] = True
             if b[2].button("🪜 Steps", key=f"steps_{t['task_id']}", use_container_width=True):
-                with st.spinner("Breaking into steps…"):
-                    s = ai.break_into_steps(t["title"], t["day_goal"], role_prompt)
+                topic = storage._topic_of(t["day_goal"], t.get("category", ""))
+                past, matched = storage.find_step_template(uk, topic, t["title"])
+                with st.spinner("Breaking into steps…" + (" (using your past steps)" if past else "")):
+                    s = ai.break_into_steps(t["title"], t["day_goal"], role_prompt, past_steps=past)
                     storage.set_task_steps(uk, t["task_id"], s)
                     storage.log_task_event(uk, t["task_id"], t["title"], "steps_added",
-                                           t["day_goal"], detail=f"{len(s)} steps")
+                                           t["day_goal"], detail=f"{len(s)} steps"
+                                           + (f" (from '{matched}')" if past else ""))
                 st.rerun()
             if b[3].button("🗑", key=f"del_{t['task_id']}", use_container_width=True):
                 storage.update_task(uk, t["task_id"], status="Dropped"); st.rerun()
@@ -878,6 +905,9 @@ def _task_card(uk, t, headings, role_prompt=""):
                     lines = [ln.strip() for ln in own.splitlines() if ln.strip()]
                     if lines:
                         storage.set_task_steps(uk, t["task_id"], lines)
+                        # remember the user's own steps for similar future tasks
+                        topic = storage._topic_of(t["day_goal"], t.get("category", ""))
+                        storage.save_step_template(uk, topic, t["title"], lines)
                         storage.log_task_event(uk, t["task_id"], t["title"], "steps_added",
                                                t["day_goal"], detail=f"{len(lines)} own steps")
                         st.rerun()
@@ -958,8 +988,36 @@ def _buzzer(uk, user):
             "beep_short.ogg' type='audio/ogg'></audio>", unsafe_allow_html=True)
 
 
+def _maybe_nudge_popup(user):
+    """Show ONE nudge popup per session, capped at 4 per day. Driven by the person's role +
+    accepted learnings (both injected into the AI call)."""
+    uk = user["user_key"]
+    if st.session_state.get("nudge_popped_session"):
+        return
+    if storage.get_popup_count(uk, TODAY_STR) >= 4:        # daily cap
+        return
+    try:
+        tasks = storage.get_tasks(uk, TODAY_STR)
+        open_titles, goals = [], []
+        if not tasks.empty:
+            open_t = tasks[~tasks["status"].isin(["Done", "Dropped"])]
+            open_titles = list(open_t["title"])[:12]
+            goals = [g for g in tasks["day_goal"].tolist() if g][:8]
+        msg = ai.daily_nudge(open_titles, goals)
+    except Exception:
+        msg = ""
+    st.session_state["nudge_popped_session"] = True       # one per session regardless
+    if msg:
+        try:
+            st.toast(msg, icon="💡")
+        except Exception:
+            st.info(f"💡 {msg}")
+        storage.bump_popup_count(uk, TODAY_STR)
+
+
 def today_view(user):
     _buzzer(user["user_key"], user)
+    _maybe_nudge_popup(user)
     _mis_alert_banner(user["user_key"], user)
     left, right = st.columns([1, 1], gap="large")
     with left:
@@ -1549,8 +1607,15 @@ def daily_log_view(user):
             tl = {"new_partner": "New partner", "existing_partner": "Existing partner",
                   "client": "Client", "internal": "Internal"}
             for _, m in mtg.iterrows():
-                with st.expander(f"{tl.get(m['meeting_type'], m['meeting_type'])} · "
-                                 f"{m['identity_value']} · {m['date']}"):
+                name = (m.get("partner_name") or "").strip() or m.get("identity_value") or "—"
+                summary = (m["ai_written"] or m.get("raw_dictation") or "").strip().replace("\n", " ")
+                gist = (summary[:90] + "…") if len(summary) > 90 else summary
+                label = (f"👤 {name} · {tl.get(m['meeting_type'], m['meeting_type'])} · {m['date']}"
+                         + (f" — {gist}" if gist else ""))
+                with st.expander(label):
+                    if name and name != "—":
+                        st.markdown(f"**{name}**" + (f"  ·  {m['identity_value']}"
+                                    if m.get("identity_value") and m["identity_value"] != name else ""))
                     st.markdown(m["ai_written"].replace("\n", "  \n") if m["ai_written"] else "_(no summary)_")
                     if m["next_date"]:
                         booked = "✅ scheduled" if m["followup_task_id"] else "⚠️ not scheduled"
@@ -1815,6 +1880,12 @@ def _learn_dictate(uk, role):
             storage.save_daily_log(uk, TODAY_STR, txt, partner_name=p_name,
                                    partner_mobile=p_mobile, partner_code=p_code)
             st.session_state["_clear_log_text"] = True
+            # scan the log for a future commitment with a date ("next Thursday" etc.)
+            sugg = ai.detect_followup_from_log(txt, TODAY_STR)
+            if sugg.get("has_followup"):
+                if not sugg.get("who") and p_name:
+                    sugg["who"] = p_name
+                st.session_state["log_followup_suggestion"] = sugg
             if p_mobile:
                 st.success(f"Saved and linked to {p_name} (added/updated in Directory).")
             elif p_name:
@@ -1822,6 +1893,27 @@ def _learn_dictate(uk, role):
             else:
                 st.success("Saved. Go to ‘Review learnings’ to mine it.")
             st.rerun()
+
+    # Follow-up the log mentioned for a future day — offer to schedule it
+    sugg = st.session_state.get("log_followup_suggestion")
+    if sugg:
+        from datetime import datetime as _dt
+        nice = _dt.strptime(sugg["date"], "%Y-%m-%d").strftime("%A, %d %b")
+        who = sugg.get("who") or ""
+        what = sugg.get("what") or "Follow up"
+        with st.container(border=True):
+            st.markdown(f"📅 **Looks like a follow-up for {nice}**")
+            st.caption((f"With **{who}** — " if who else "") + what)
+            cc = st.columns([2, 1])
+            if cc[0].button(f"➕ Add follow-up on {nice}", type="primary", key="add_log_followup"):
+                title = what if what else (f"Follow up: {who}" if who else "Follow up")
+                storage.schedule_followup(uk, sugg["date"], who or what, "", title=title)
+                st.session_state.pop("log_followup_suggestion", None)
+                st.success(f"Scheduled — it'll appear in your tasks on {sugg['date']}.")
+                st.rerun()
+            if cc[1].button("Dismiss", key="dismiss_log_followup"):
+                st.session_state.pop("log_followup_suggestion", None)
+                st.rerun()
 
     logs = storage.get_daily_logs(uk)
     if not logs.empty:
@@ -2065,6 +2157,21 @@ def main():
     # quote, task suggestions, nudges, KRA reminders, message-writing, and summaries are
     # all shaped by the role's goal. (Must run before the quote is generated below.)
     ai.set_role_brief(storage.read_role_prompt(user.get("role", ""), user["user_key"]))
+
+    # Inject the person's ACCEPTED learnings into every AI call too — so nudges, next-actions,
+    # cues, the quote and messages reflect what they've learned and how they like to work.
+    try:
+        acc = storage.get_learnings(user["user_key"], status="accepted")
+        if not acc.empty:
+            lines = []
+            for _, lr in acc.iterrows():
+                tp = (lr.get("topic") or "").strip()
+                lines.append(f"- ({tp}) {lr['text']}" if tp else f"- {lr['text']}")
+            ai.set_learnings_brief("\n".join(lines[:40]))
+        else:
+            ai.set_learnings_brief("")
+    except Exception:
+        ai.set_learnings_brief("")
 
     # periodic backup: push local files to Google Sheets every ~30 min while the app is open
     _maybe_backup(user["user_key"])
