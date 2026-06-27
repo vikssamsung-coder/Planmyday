@@ -27,6 +27,7 @@ import pandas as pd
 import storage
 import nudge
 import ai
+import retrieval
 import report
 import workspace as ws
 import style
@@ -53,6 +54,17 @@ except Exception:
 
 TODAY = date.today()
 TODAY_STR = TODAY.strftime("%Y-%m-%d")
+
+# Users allowed to see the PARTNER-ACQUISITION surfaces: the New Partner meeting logging
+# (the "Daily log" tab), the Partner section of the Directory, and Communicate. Everyone
+# else does not see these. Edit this set to grant/revoke access.
+# (To gate by ROLE instead of by username, change _partner_features_allowed below to check
+#  user.get("role") in {"partner_acquisition", "digital_partner_acquisition"}.)
+PARTNER_FEATURE_USERS = {"rinku", "ketki"}
+
+
+def _partner_features_allowed(user):
+    return (user or {}).get("user_key", "") in PARTNER_FEATURE_USERS
 MONTH = TODAY.strftime("%Y-%m")
 
 # First launch: build the workspace on disk (folders + Excel + md + role prompts),
@@ -390,9 +402,10 @@ def plan_and_tasks(user, cards):
                 # companion cue — lead with a proven rule for this topic if one exists
                 topic = storage._topic_of(t.get("day_goal", ""), t.get("category", ""))
                 rule = storage.best_rule(uk, topic)
+                rel = _task_relevant_context(uk, t.get("title", ""), t.get("day_goal", ""))
                 t["coach_cue"] = ai.companion_cue(
                     t.get("title", ""), t.get("day_goal", ""), role_prompt,
-                    mis_ctx, rule["rule_text"] if rule else "")
+                    mis_ctx, rule["rule_text"] if rule else "", relevant_context=rel)
             storage.add_tasks(uk, proposed)   # autosave — no Save button
             st.session_state._clear_plan = True
             st.rerun()
@@ -763,9 +776,11 @@ def _task_card(uk, t, headings, role_prompt=""):
             with st.spinner("Thinking…"):
                 topic = storage._topic_of(new_goal, t.get("category", ""))
                 rule = storage.best_rule(uk, topic)
+                rel = _task_relevant_context(uk, t["title"], new_goal)
                 new_cue = ai.companion_cue(t["title"], new_goal, role_prompt,
                                            _mis_cue_context(uk, user, None),
-                                           rule["rule_text"] if rule else "")
+                                           rule["rule_text"] if rule else "",
+                                           relevant_context=rel)
                 storage.update_task(uk, t["task_id"], coach_cue=new_cue)
             st.rerun()
 
@@ -988,25 +1003,134 @@ def _buzzer(uk, user):
             "beep_short.ogg' type='audio/ogg'></audio>", unsafe_allow_html=True)
 
 
+def _personalisation_brief(user):
+    """The always-on personalisation text. Two layers:
+      - <= RAW_INLINE_MAX accepted learnings: return them raw (all fit, zero loss).
+      - more than that: return a DISTILLED brief covering ALL of them, regenerated from the
+        full raw set when it has grown by >= REGEN_GROWTH since the brief was last built
+        (or when no brief exists yet). Regeneration is the only AI call here and is rare.
+    """
+    RAW_INLINE_MAX = 12      # below this, just inline the raw learnings
+    REGEN_GROWTH = 12        # regenerate the distilled brief after this many new learnings
+    uk = user["user_key"]
+    acc = storage.get_learnings(uk, status="accepted")
+    n = 0 if acc is None or acc.empty else len(acc)
+    if n == 0:
+        return ""
+
+    def _raw_lines(df):
+        lines = []
+        for _, lr in df.iterrows():
+            tp = (lr.get("topic") or "").strip()
+            lines.append(f"- ({tp}) {lr['text']}" if tp else f"- {lr['text']}")
+        return "\n".join(lines)
+
+    if n <= RAW_INLINE_MAX:
+        return _raw_lines(acc)
+
+    # many learnings -> use the distilled brief, regenerating when it's grown enough
+    digest = None
+    try:
+        digest = storage.get_learnings_digest(uk)
+    except Exception:
+        digest = None
+    prev_count = int(digest["source_count"]) if (digest and str(digest.get("source_count","")).isdigit()) else -1
+    need_regen = (digest is None) or (n - prev_count >= REGEN_GROWTH) or (n < prev_count)
+
+    if need_regen:
+        try:
+            role_prompt = storage.read_role_prompt(user.get("role", ""), uk)
+        except Exception:
+            role_prompt = ""
+        raw = [{"text": lr.get("text", ""), "topic": lr.get("topic", "")}
+               for _, lr in acc.iterrows()]
+        brief = ai.distill_learnings(raw, role_prompt=role_prompt)
+        if brief:
+            try:
+                storage.save_learnings_digest(uk, brief, n)
+            except Exception:
+                pass
+            return brief
+        # distillation produced nothing — fall back to a recent slice rather than nothing
+        return _raw_lines(acc.tail(RAW_INLINE_MAX))
+
+    return digest.get("brief") or _raw_lines(acc.tail(RAW_INLINE_MAX))
+
+
+def _task_relevant_context(uk, task_title, day_goal=""):
+    """Build a SHORT, relevant context block for a task — the few learnings/meetings/logs
+    that relate to it — selected in Python (no AI). Stores are read once per session and
+    cached, so this is effectively free to call per task. Empty string if nothing fits."""
+    if not (task_title or day_goal):
+        return ""
+    cache = st.session_state.setdefault("_retrieval_cache", {})
+    # cache the source frames for a few seconds so generating cues for a whole plan
+    # doesn't re-read storage once per task
+    import time as _t
+    stamp = cache.get("_stamp", 0)
+    if _t.time() - stamp > 20:
+        try:
+            cache["learnings"] = storage.get_learnings(uk, status="accepted")
+        except Exception:
+            cache["learnings"] = None
+        try:
+            cache["meetings"] = storage.get_meetings(uk)
+        except Exception:
+            cache["meetings"] = None
+        try:
+            cache["logs"] = storage.get_daily_logs(uk) if hasattr(storage, "get_daily_logs") else None
+        except Exception:
+            cache["logs"] = None
+        cache["_stamp"] = _t.time()
+    try:
+        return retrieval.context_for_task(
+            task_title, day_goal,
+            learnings_df=cache.get("learnings"),
+            meetings_df=cache.get("meetings"),
+            logs_df=cache.get("logs"))
+    except Exception:
+        return ""
+
+
 def _maybe_nudge_popup(user):
-    """Show ONE nudge popup per session, capped at 4 per day. Driven by the person's role +
-    accepted learnings (both injected into the AI call)."""
+    """Show ONE nudge popup per session, capped at 4 per day. Instant (no AI call on the
+    open path): surfaces a goal-drift warning, else one of the person's accepted learnings."""
     uk = user["user_key"]
     if st.session_state.get("nudge_popped_session"):
         return
-    if storage.get_popup_count(uk, TODAY_STR) >= 4:        # daily cap
+    st.session_state["nudge_popped_session"] = True      # one per session, set up front
+    if storage.get_popup_count(uk, TODAY_STR) >= 4:       # daily cap
         return
+    msg = ""
     try:
         tasks = storage.get_tasks(uk, TODAY_STR)
-        open_titles, goals = [], []
         if not tasks.empty:
             open_t = tasks[~tasks["status"].isin(["Done", "Dropped"])]
-            open_titles = list(open_t["title"])[:12]
-            goals = [g for g in tasks["day_goal"].tolist() if g][:8]
-        msg = ai.daily_nudge(open_titles, goals)
+            if not open_t.empty:
+                unlinked = open_t[(open_t["day_goal"].fillna("") == "")
+                                  & (open_t["source"] != "follow_up")]
+                if len(unlinked) >= 2:
+                    msg = (f"{len(unlinked)} of {len(open_t)} tasks today aren't tied to a "
+                           f"goal — sure they belong on today?")
+        if not msg:
+            acc = storage.get_learnings(uk, status="accepted")
+            if not acc.empty:
+                # surface the learning most RELEVANT to today's open tasks (Python, no AI);
+                # fall back to a recent one if nothing matches.
+                focus = ""
+                try:
+                    ot = storage.get_tasks(uk, TODAY_STR)
+                    if not ot.empty:
+                        ot = ot[~ot["status"].isin(["Done", "Dropped"])]
+                        focus = " ".join(ot["title"].fillna("").tolist()[:6]
+                                         + ot["day_goal"].fillna("").tolist()[:6])
+                except Exception:
+                    focus = ""
+                picked = retrieval.relevant_learnings(acc, focus, k=1) if focus else []
+                text = picked[0]["text"] if picked else str(acc.sample(1).iloc[0]["text"])
+                msg = "Remember: " + text
     except Exception:
         msg = ""
-    st.session_state["nudge_popped_session"] = True       # one per session regardless
     if msg:
         try:
             st.toast(msg, icon="💡")
@@ -1031,10 +1155,10 @@ def today_view(user):
     if _should_show_close_my_day(uk):
         st.divider()
         if not st.session_state.get("closeday_open"):
-            st.markdown('<div class="closeday-bar">🌙 Close My Day'
+            st.markdown('<div class="closeday-bar">🌙 Close My Day (Today)'
                         '<span class="sub">Wrap up — today\'s numbers, cue check-ins, DSR & backup</span>'
                         '</div>', unsafe_allow_html=True)
-            if st.button("🌙 Open Close My Day", use_container_width=True, key="open_closeday"):
+            if st.button("🌙 Open Close My Day (Today)", use_container_width=True, key="open_closeday"):
                 st.session_state["closeday_open"] = True
                 st.rerun()
         else:
@@ -1119,6 +1243,9 @@ def _should_show_close_my_day(uk):
 
 def communicate_view(user):
     uk = user["user_key"]
+    if not _partner_features_allowed(user):
+        st.info("This section isn't part of your workspace.")
+        return
     st.markdown("### 📣 Communicate")
     st.caption("Left: compose a message (AI reads your image). Right: pick contacts and send "
                "via WhatsApp Web. WhatsApp links carry text only — attach the media in the one tap.")
@@ -1592,6 +1719,9 @@ def _monthly_view_live(user):
 
 
 def daily_log_view(user):
+    if not _partner_features_allowed(user):
+        st.info("This section isn't part of your workspace.")
+        return
     st.markdown("### 📒 Daily log")
     # radio (not st.tabs) — a custom component like the mic recorder fails to mount
     # inside a hidden tab panel, so we render one view at a time.
@@ -1653,12 +1783,15 @@ def records_view(user):
 
 def _directory_section(user):
     uk = user["user_key"]
+    partner_ok = _partner_features_allowed(user)
+    type_opts = ["partner", "team"] if partner_ok else ["team"]
     with st.form("add_contact"):
-        st.caption("Add a contact — partner or team member. Used as reminder recipients.")
+        st.caption("Add a contact — partner or team member. Used as reminder recipients."
+                   if partner_ok else "Add a team member. Used for task collaborators & reminders.")
         c = st.columns([3, 3, 2])
         name = c[0].text_input("Name")
         mobile = c[1].text_input("Mobile")
-        ctype = c[2].selectbox("Type", ["partner", "team"])
+        ctype = c[2].selectbox("Type", type_opts)
         c2 = st.columns([2, 3, 3])
         sal = c2[0].selectbox("Address as", ["—", "Sir", "Mam"],
                               help="Used to greet partners as ‘Name Sir’ / ‘Name Mam’")
@@ -1678,7 +1811,8 @@ def _directory_section(user):
         st.caption("Columns recognised: Name, Mobile/Phone, Code (and optional Role). "
                    "Matched by phone → code → name, so re-uploading updates existing contacts.")
         up = st.file_uploader("Directory .xlsx", type=["xlsx"], key="dir_upload")
-        uctype = st.radio("Import as", ["partner", "team"], horizontal=True, key="dir_uptype")
+        uctype = (st.radio("Import as", ["partner", "team"], horizontal=True, key="dir_uptype")
+                  if partner_ok else "team")
         if up is not None and st.button("Import contacts", key="dir_import_btn"):
             try:
                 done, skipped = storage.import_directory_excel(uk, up, contact_type=uctype)
@@ -1703,7 +1837,8 @@ def _directory_section(user):
         h = int(hashlib.md5(str(text).encode()).hexdigest(), 16)
         return palette[h % len(palette)]
 
-    for ctype, label in [("partner", "Partners"), ("team", "Team")]:
+    groups = [("partner", "Partners"), ("team", "Team")] if partner_ok else [("team", "Team")]
+    for ctype, label in groups:
         grp = contacts[contacts["contact_type"] == ctype]
         if grp.empty:
             continue
@@ -2063,10 +2198,20 @@ def team_view(user):
 
 # ================================================================ shell + header nav
 
-def header_nav(is_lead):
-    """Single-row header tabs across the full content width."""
-    tabs = ["Today", "Daily log", "Records", "Communicate", "Monthly", "Learning", "History", "Settings"]
-    icons = ["columns-gap", "notebook", "address-book", "send", "compass", "lightbulb", "history", "gear"]
+def header_nav(is_lead, partner_ok=True):
+    """Single-row header tabs across the full content width. Daily log and Communicate are
+    shown only to users allowed the partner-acquisition surfaces."""
+    tabs = ["Today"]
+    if partner_ok:
+        tabs.append("Daily log")
+    tabs.append("Records")
+    if partner_ok:
+        tabs.append("Communicate")
+    tabs += ["Monthly", "Learning", "History", "Settings"]
+    icon_map = {"Today": "columns-gap", "Daily log": "notebook", "Records": "address-book",
+                "Communicate": "send", "Monthly": "compass", "Learning": "lightbulb",
+                "History": "history", "Settings": "gear"}
+    icons = [icon_map[t] for t in tabs]
     if HAVE_OPTION_MENU:
         return option_menu(
             None, tabs, icons=icons, orientation="horizontal", default_index=0,
@@ -2093,6 +2238,21 @@ def _maybe_backup(uk):
             st.session_state["last_backup_info"] = f"backup failed: {e}"
 
 
+def _had_activity(uk, d):
+    """Did the user actually use the app on date d? (Any tasks planned, or a daily log.)
+    If not, there's nothing to close — so the close-day gate must not block on it."""
+    try:
+        t = storage.get_tasks(uk, d)
+        if not t.empty:
+            return True
+        logs = storage.get_daily_logs(uk)
+        if not logs.empty and (logs["date"] == d).any():
+            return True
+    except Exception:
+        return False
+    return False
+
+
 def _force_close_previous_day(user, prev_date):
     """Blocking screen shown when the previous working day wasn't closed. The user must
     close it (download its report) before they can use anything else."""
@@ -2110,11 +2270,15 @@ def _force_close_previous_day(user, prev_date):
     """, unsafe_allow_html=True)
 
     month = prev_date[:7]
-    try:
-        dsr_bytes = dsr.build_docx(user, prev_date, month)
-    except Exception as e:
-        dsr_bytes = None
-        st.error(f"Couldn't build the report: {e}")
+    # Build the report ONCE and cache it — never rebuild on every rerun (that was very slow).
+    ck = f"forceclose_dsr_{prev_date}"
+    if ck not in st.session_state:
+        try:
+            st.session_state[ck] = dsr.build_docx(user, prev_date, month)
+        except Exception as e:
+            st.session_state[ck] = None
+            st.error(f"Couldn't build the report: {e}")
+    dsr_bytes = st.session_state[ck]
 
     if dsr_bytes:
         # save the report (text → cloud, plus local Word archive) once
@@ -2137,6 +2301,7 @@ def _force_close_previous_day(user, prev_date):
         if st.button(f"✅ Close {nice} & continue", type="primary", use_container_width=True):
             storage.mark_day_closed(uk, prev_date)
             st.session_state.pop("forceclose_saved", None)
+            st.session_state.pop(ck, None)
             st.rerun()
     else:
         # report couldn't build — still let them close so they aren't permanently locked out
@@ -2158,18 +2323,15 @@ def main():
     # all shaped by the role's goal. (Must run before the quote is generated below.)
     ai.set_role_brief(storage.read_role_prompt(user.get("role", ""), user["user_key"]))
 
-    # Inject the person's ACCEPTED learnings into every AI call too — so nudges, next-actions,
-    # cues, the quote and messages reflect what they've learned and how they like to work.
+    # Personalisation brief (the always-on half of the two-layer design):
+    #   * few learnings  -> inject them raw (they all fit; nothing to lose)
+    #   * many learnings -> inject a DISTILLED brief that preserves the essence of ALL of
+    #     them (so old preferences are never dropped by a recency cap). The brief is a
+    #     derived view, regenerated from the FULL raw set when it has grown enough — never
+    #     from a previous brief, so there's no compounding summary-of-summary loss.
+    # Task-specific calls additionally get only the RELEVANT raw learnings via retrieval.py.
     try:
-        acc = storage.get_learnings(user["user_key"], status="accepted")
-        if not acc.empty:
-            lines = []
-            for _, lr in acc.iterrows():
-                tp = (lr.get("topic") or "").strip()
-                lines.append(f"- ({tp}) {lr['text']}" if tp else f"- {lr['text']}")
-            ai.set_learnings_brief("\n".join(lines[:40]))
-        else:
-            ai.set_learnings_brief("")
+        ai.set_learnings_brief(_personalisation_brief(user))
     except Exception:
         ai.set_learnings_brief("")
 
@@ -2200,18 +2362,24 @@ def main():
             del st.session_state.user
             st.rerun()
 
-    # GATE: if the previous working day wasn't closed, force-close it first — block every
-    # other screen until it's done. (Only Sunday is a non-working day.)
+    # GATE: if the previous working day had ACTIVITY but wasn't closed, force-close it first —
+    # block every other screen until done. (Only Sunday is non-working. A day with no tasks or
+    # log had nothing to close, so it never blocks — new users aren't locked out.)
     uk = user["user_key"]
     if datetime.now().weekday() != 6:
         prev = _prev_working_day(date.today()).isoformat()
-        if not storage.is_day_closed(uk, prev):
+        if (not storage.is_day_closed(uk, prev)) and _had_activity(uk, prev):
             _force_close_previous_day(user, prev)
             return
 
     # Row 2: full-width nav (single clean row)
-    choice = header_nav(is_lead)
+    partner_ok = _partner_features_allowed(user)
+    choice = header_nav(is_lead, partner_ok)
     st.divider()
+
+    # Defensive: if a non-allowed user somehow lands on a gated view, send them to Today.
+    if choice in ("Daily log", "Communicate") and not partner_ok:
+        choice = "Today"
 
     {"Today": today_view, "Daily log": daily_log_view, "Records": records_view,
      "Communicate": communicate_view, "Monthly": monthly_view, "Learning": learning_view,

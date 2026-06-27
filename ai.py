@@ -570,9 +570,12 @@ number, say so kindly. No lists, no headings — just talk to them.
 Return STRICT JSON: {"cue": "..."}"""
 
 
-def companion_cue(task_title, day_goal, role_prompt="", mis_context="", proven_rule=""):
+def companion_cue(task_title, day_goal, role_prompt="", mis_context="", proven_rule="",
+                  relevant_context=""):
     """A warm, role+target-aware cue on how to do this task. Leads with a proven
-    rule if one exists. Falls back to the proven rule text, or a simple line."""
+    rule if one exists. `relevant_context` is a SHORT, pre-selected (in Python) block of
+    the few learnings/meetings that relate to THIS task — so the model gets only what
+    matters, not the whole history. Falls back to the proven rule text, or a simple line."""
     if proven_rule and not have_key():
         return f"Last time this worked for you: {proven_rule} — do that again."
     if not have_key():
@@ -581,6 +584,8 @@ def companion_cue(task_title, day_goal, role_prompt="", mis_context="", proven_r
         ctx = {"task": task_title, "goal": day_goal,
                "role_prompt": (role_prompt or "")[:2500],
                "their_numbers": mis_context, "proven_rule": proven_rule}
+        if relevant_context:
+            ctx["relevant_history"] = relevant_context[:1200]
         data = _chat_json(CUE_SYSTEM, ctx, max_tokens=300)
         return (data.get("cue") or "").strip()
     except Exception:
@@ -939,6 +944,80 @@ NUDGE_SYSTEM = """You are the person's companion coach. Give ONE short, warm, sp
 relevant, lead with it ("last time X worked — do that again"). Tie it to their goal and make
 it actionable. Talk like a friend who wants them to win — not corporate, no lists, no headings.
 Return STRICT JSON: {"nudge": "..."}"""
+
+
+DISTILL_LEARNINGS_SYSTEM = """You compress a person's accumulated work LEARNINGS into a tight,
+durable PROFILE that another AI will read on every interaction to personalise its coaching.
+
+You are given the FULL list of this person's accepted learnings (lessons they've confirmed about
+how to work better, plus their preferences and operating style). They may number in the dozens.
+Your job: distill ALL of them into a compact brief that preserves the ESSENCE — so nothing
+important is lost even though the text is short.
+
+Rules:
+- Organise into clear CATEGORIES (e.g. "How they like to work / preferences", "Pitching & partners",
+  "Follow-up discipline", "Onboarding & KYC", "Reporting", etc.) — only the categories that apply.
+- PRESERVE every STANDING PREFERENCE and operating-style point in full force (e.g. "prefers direct
+  feedback", "works best in mornings", "always lead with payout economics"). These are the most
+  valuable lines — never drop or soften them, even if they're old.
+- MERGE duplicates and near-duplicates into one stronger line. Keep specific, actionable detail
+  (numbers, timeframes, what worked) — don't generalise away the useful specifics.
+- Do NOT invent anything. Every line must trace to the input. If something is unclear, omit it.
+- Keep it tight: aim for under ~280 words total. Short bullet lines under each category heading.
+- Write it as guidance the coach can act on, in plain language.
+
+Return STRICT JSON: {"brief": "## Category\\n- point\\n- point\\n\\n## Category\\n- point ..."}"""
+
+
+def distill_learnings(raw_learnings, role_prompt=""):
+    """Compress ALL of a person's accepted learnings into a compact, category-organised
+    brief that preserves their essence (especially standing preferences). `raw_learnings`
+    is a list of dicts with at least 'text' (and optionally 'topic'). Returns the brief
+    string. Falls back to a simple grouped concatenation with no key or on any error — so
+    personalisation never disappears.
+
+    This is the DURABLE half of the two-layer design: raw learnings are kept forever; this
+    distilled brief is a derived view, regenerated from the full raw set (never from a
+    previous brief), so it never suffers compounding summary-of-summary loss.
+    """
+    items = []
+    for l in (raw_learnings or []):
+        txt = str((l.get("text") if isinstance(l, dict) else l) or "").strip()
+        if not txt:
+            continue
+        tp = str(l.get("topic", "")).strip() if isinstance(l, dict) else ""
+        items.append({"topic": tp, "text": txt})
+    if not items:
+        return ""
+
+    # fallback: group by topic, no AI
+    def _fallback():
+        from collections import OrderedDict
+        groups = OrderedDict()
+        for it in items:
+            groups.setdefault(it["topic"] or "General", []).append(it["text"])
+        out = []
+        for g, lines in groups.items():
+            out.append(f"## {g}")
+            seen = set()
+            for ln in lines:
+                key = ln.lower()
+                if key not in seen:
+                    seen.add(key)
+                    out.append(f"- {ln}")
+        return "\n".join(out)
+
+    if not have_key():
+        return _fallback()
+    try:
+        ctx = {"learnings": items}
+        if role_prompt:
+            ctx["their_role_context"] = role_prompt[:1500]
+        data = _chat_json(DISTILL_LEARNINGS_SYSTEM, ctx, max_tokens=900)
+        brief = (data.get("brief") or "").strip()
+        return brief or _fallback()
+    except Exception:
+        return _fallback()
 
 
 def daily_nudge(open_tasks=None, day_goals=None):

@@ -181,3 +181,9 @@ STEP_TEMPLATES = ["template_id", "user_key", "topic", "task_title", "steps_json"
 
 # How many nudge popups have been shown to the user on a given day (cap = 4/day).
 POPUP_COUNTS = ["date", "user_key", "count"]
+
+# The DISTILLED learnings brief — one row per user. A derived, compact, category-organised
+# digest of ALL accepted learnings (regenerated from the full raw set when it grows), used
+# as the always-on personalisation so old preferences are never lost to a recency cap.
+# source_count = how many accepted learnings the brief was built from (drives regeneration).
+LEARNINGS_DIGEST = ["user_key", "brief", "source_count", "updated_at"]

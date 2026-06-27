@@ -12,3 +12,5 @@ gspread>=6.0
 google-auth>=2.20
 google-api-python-client>=2.100
 streamlit-autorefresh>=1.0.1
+psycopg[binary]
+psycopg_pool

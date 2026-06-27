@@ -24,6 +24,18 @@ try:
 except Exception:
     gsheets = None
 
+try:
+    import db
+except Exception:
+    db = None
+
+
+def _use_pg():
+    """True when the Postgres (Neon) backend should handle storage: the db module is
+    importable AND a connection is configured. When True it takes precedence over both
+    the local-Excel and Google-Sheets backends."""
+    return db is not None and db.enabled()
+
 
 def _route(path):
     """Derive (spreadsheet_title, tab) from a workspace file path:
@@ -109,6 +121,14 @@ def local_first():
 
 
 def _read(path, columns):
+    # Postgres (Neon) backend — used on Cloud when NEON_DATABASE_URL is configured.
+    if _use_pg():
+        title, tab = _route(path)
+        try:
+            return db.read_table(tab, title, columns)
+        except Exception:
+            # if a Postgres read fails, fall through to the existing backends below
+            pass
     if _cloud() and not local_first():
         title, tab = _route(path)
         cached = _cache_get(title, tab)
@@ -134,11 +154,16 @@ def _read(path, columns):
 
 
 def _write(path, df, columns):
-    """Atomic, lock-guarded write. Local-first: writes the local Excel file (the Sheets
-    backup happens later via sync_to_sheets)."""
+    """Atomic, lock-guarded write. Postgres on Cloud when configured; else Sheets on
+    Cloud; else local Excel (with a later Sheets backup)."""
     for c in columns:
         if c not in df.columns:
             df[c] = ""
+    # Postgres (Neon) backend
+    if _use_pg():
+        title, tab = _route(path)
+        db.write_table(tab, title, df, columns)
+        return
     if _cloud() and not local_first():
         title, tab = _route(path)
         gsheets.set_df(title, tab, df, columns)
@@ -1824,3 +1849,20 @@ def bump_popup_count(user_key, date):
                                        "count": str(cur + 1)}])], ignore_index=True)
     _write(_popup_counts_path(user_key), df, schemas.POPUP_COUNTS)
     return cur + 1
+
+
+def _learnings_digest_path(user_key):
+    return os.path.join(_user_dir(user_key), "learnings_digest.xlsx")
+
+
+def get_learnings_digest(user_key):
+    """The stored distilled learnings brief (or None). dict: brief, source_count, updated_at."""
+    df = _read(_learnings_digest_path(user_key), schemas.LEARNINGS_DIGEST)
+    return None if df.empty else df.iloc[0].to_dict()
+
+
+def save_learnings_digest(user_key, brief, source_count):
+    """Store the distilled brief (one row per user — replaces any prior brief)."""
+    df = pd.DataFrame([{"user_key": user_key, "brief": str(brief or ""),
+                        "source_count": str(source_count), "updated_at": _now()}])
+    _write(_learnings_digest_path(user_key), df, schemas.LEARNINGS_DIGEST)
