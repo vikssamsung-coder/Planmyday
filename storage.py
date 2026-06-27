@@ -1716,3 +1716,23 @@ def get_dsr(user_key, date):
     df = _read(_dsr_log_path(user_key), schemas.DSR_LOG)
     hit = df[df["date"] == date] if not df.empty else df
     return hit.iloc[0]["report_text"] if not hit.empty else ""
+
+
+# ---------------------------------------------------------------- day close tracking
+
+def _closed_days_path(user_key):
+    return os.path.join(_user_dir(user_key), "closed_days.xlsx")
+
+
+def mark_day_closed(user_key, date):
+    df = _read(_closed_days_path(user_key), schemas.CLOSED_DAYS)
+    if not df.empty and (df["date"] == date).any():
+        return
+    row = {"date": date, "user_key": user_key, "closed_at": _now()}
+    df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
+    _write(_closed_days_path(user_key), df, schemas.CLOSED_DAYS)
+
+
+def is_day_closed(user_key, date):
+    df = _read(_closed_days_path(user_key), schemas.CLOSED_DAYS)
+    return (not df.empty) and (df["date"] == date).any()

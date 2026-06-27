@@ -170,3 +170,7 @@ TASK_UPDATES = ["update_id", "task_id", "user_key", "remark", "created_at"]
 # Daily Status Report archive — the DSR's text content, one row per day. Syncs to Sheets
 # via the normal backup, so the report is preserved in the cloud (silently).
 DSR_LOG = ["date", "user_key", "report_text", "created_at"]
+
+# Days the user has explicitly closed (via Close My Day → download report). Drives the
+# "close your previous day first" gate.
+CLOSED_DAYS = ["date", "user_key", "closed_at"]

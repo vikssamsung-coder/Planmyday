@@ -123,7 +123,111 @@ def login_view():
 
 # ================================================================ MIS dashboard (LEFT half)
 
+@st.cache_data(show_spinner=False)
+def _baby_gif_uri():
+    """Load the 'guess who's coming' GIF from assets and return a data URI (self-contained,
+    so it works on Streamlit Cloud with no static-file setup). Cached after first read."""
+    import base64, os
+    p = os.path.join(os.path.dirname(__file__), "assets", "baby.gif")
+    try:
+        with open(p, "rb") as f:
+            return "data:image/gif;base64," + base64.b64encode(f.read()).decode()
+    except Exception:
+        return ""
+
+
+def _mis_coming_soon(title, subtitle, points, tiles=4, emoji="📊", status="syncing your data… ✨"):
+    """A fun, Gen-Z 'coming soon' state for MIS views while the backend is being connected:
+    animated rainbow gradient, floating blobs, sparkles, a dancing GIF, gradient text, emoji
+    chips, and a shimmer 'syncing' bar — plus skeleton preview tiles for the future layout."""
+    css = """
+<style>
+@keyframes csGrad{0%{background-position:0% 50%}50%{background-position:100% 50%}100%{background-position:0% 50%}}
+@keyframes csBlob{0%,100%{transform:translate(0,0) scale(1)}33%{transform:translate(16px,-12px) scale(1.12)}66%{transform:translate(-12px,10px) scale(.92)}}
+@keyframes csTwinkle{0%,100%{opacity:.2;transform:scale(.7)}50%{opacity:1;transform:scale(1.25)}}
+@keyframes csBounce{0%,100%{transform:translateY(0)}50%{transform:translateY(-9px)}}
+@keyframes csBar{0%{left:-45%}100%{left:100%}}
+@keyframes csDot{0%,100%{box-shadow:0 0 0 0 rgba(0,255,193,.65)}70%{box-shadow:0 0 0 9px rgba(0,255,193,0)}}
+@keyframes csShimmer{0%{background-position:-220px 0}100%{background-position:220px 0}}
+.cs-hero{position:relative;overflow:hidden;border-radius:22px;padding:30px 22px;margin:6px 0 14px;text-align:center;
+  background:linear-gradient(120deg,#5367FC,#7C3AED,#EC4899,#00FFC1,#5367FC);background-size:300% 300%;
+  animation:csGrad 8s ease infinite;color:#fff;}
+.cs-blob{position:absolute;border-radius:50%;filter:blur(36px);opacity:.55;pointer-events:none;}
+.cs-blob.b1{width:170px;height:170px;background:#00FFC1;top:-46px;left:-34px;animation:csBlob 9s ease-in-out infinite;}
+.cs-blob.b2{width:150px;height:150px;background:#A855F7;bottom:-44px;right:-24px;animation:csBlob 12s ease-in-out infinite reverse;}
+.cs-spark{position:absolute;font-size:14px;animation:csTwinkle 2.4s ease-in-out infinite;pointer-events:none;}
+.cs-badge{position:relative;display:inline-flex;align-items:center;gap:7px;background:rgba(255,255,255,.16);
+  border:1px solid rgba(255,255,255,.32);border-radius:999px;padding:6px 14px;font-size:.7rem;font-weight:800;
+  letter-spacing:.13em;text-transform:uppercase;-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px);}
+.cs-livedot{width:8px;height:8px;border-radius:50%;background:#00FFC1;animation:csDot 1.6s infinite;}
+.cs-gif{width:152px;max-width:62%;border-radius:18px;margin:14px auto 6px;display:block;background:#fff;
+  box-shadow:0 10px 26px rgba(0,0,0,.20);}
+.cs-emoji{font-size:2.5rem;display:inline-block;margin:12px 0 2px;animation:csBounce 1.8s ease-in-out infinite;}
+.cs-hero h2{font-size:1.7rem;font-weight:800;margin:4px 0 8px;letter-spacing:-.02em;
+  background:linear-gradient(90deg,#ffffff,#00FFC1,#ffffff);background-size:200% auto;
+  -webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;
+  animation:csGrad 4s linear infinite;}
+.cs-hero p{color:rgba(255,255,255,.94)!important;margin:0 auto;font-size:.95rem;max-width:500px;
+  line-height:1.55;font-weight:500;}
+.cs-chips{display:flex;flex-wrap:wrap;justify-content:center;gap:8px;margin:16px auto 14px;max-width:520px;}
+.cs-chip{display:inline-flex;align-items:center;gap:6px;background:rgba(255,255,255,.17);
+  border:1px solid rgba(255,255,255,.3);border-radius:999px;padding:6px 13px;font-size:.8rem;font-weight:600;
+  color:#fff!important;-webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px);}
+.cs-track{position:relative;height:8px;border-radius:999px;background:rgba(255,255,255,.22);
+  overflow:hidden;max-width:420px;margin:4px auto 4px;}
+.cs-track>i{position:absolute;top:0;height:100%;width:45%;border-radius:999px;
+  background:linear-gradient(90deg,transparent,#00FFC1,#fff,#00FFC1,transparent);animation:csBar 1.5s ease-in-out infinite;}
+.cs-status{color:rgba(255,255,255,.9)!important;font-size:.78rem;font-weight:700;margin-top:9px;letter-spacing:.02em;}
+.cs-cap{color:#6B7480;font-size:.8rem;margin:14px 2px 8px;text-align:center;font-weight:500;}
+.cs-tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(128px,1fr));gap:12px;}
+.cs-tile{position:relative;border:1px solid #E7E3DC;border-radius:16px;padding:15px 14px 14px;background:#fff;overflow:hidden;}
+.cs-tile:before{content:'';position:absolute;top:0;left:0;right:0;height:3px;
+  background:linear-gradient(90deg,#5367FC,#00FFC1);}
+.cs-sk{height:11px;border-radius:6px;margin:8px 0;
+  background:linear-gradient(90deg,#ECEFF3 25%,#F6F8FA 37%,#ECEFF3 63%);
+  background-size:420px 100%;animation:csShimmer 1.4s linear infinite;}
+.cs-sk.w40{width:42%}.cs-sk.w70{width:72%}.cs-sk.big{height:26px;width:60%}
+</style>
+"""
+    gif = _baby_gif_uri()
+    visual = (f'<img class="cs-gif" src="{gif}" alt="guess who is coming"/>' if gif
+              else f'<div class="cs-emoji">{emoji}</div>')
+    chips = "".join(f'<span class="cs-chip">{p}</span>' for p in points)
+    tile = ('<div class="cs-tile"><div class="cs-sk w40"></div><div class="cs-sk big"></div>'
+            '<div class="cs-sk w70"></div></div>')
+    body = f"""
+<div class="cs-hero">
+  <span class="cs-blob b1"></span><span class="cs-blob b2"></span>
+  <span class="cs-spark" style="top:18px;left:28px;">✨</span>
+  <span class="cs-spark" style="top:44px;right:40px;animation-delay:.6s;">⭐</span>
+  <span class="cs-spark" style="bottom:62px;left:46px;animation-delay:1.1s;">✨</span>
+  <span class="cs-spark" style="bottom:30px;right:58px;animation-delay:1.6s;">💫</span>
+  <span class="cs-badge"><span class="cs-livedot"></span> Dropping soon</span>
+  {visual}
+  <h2>{title}</h2>
+  <p>{subtitle}</p>
+  <div class="cs-chips">{chips}</div>
+  <div class="cs-track"><i></i></div>
+  <div class="cs-status">{status}</div>
+</div>
+<div class="cs-cap">sneak peek — this is the glow-up your live numbers are getting ✨</div>
+<div class="cs-tiles">{tile*tiles}</div>
+"""
+    st.markdown(css + body, unsafe_allow_html=True)
+
+
 def mis_dashboard(user):
+    # MIS backend isn't connected yet — show a fun "coming soon" instead of empty KPIs.
+    _mis_coming_soon(
+        "Cooking up your dashboard",
+        "Your daily target-vs-achievement numbers are syncing up. Sit tight — this glow-up "
+        "is almost done. 🔥",
+        ["🎯 Target vs achieved", "⚡ Daily run-rate", "📈 KPI trends", "🧩 Source-wise"],
+        tiles=2, emoji="📊", status="syncing the data sauce…")
+    return []
+
+
+def _mis_dashboard_live(user):
     uk = user["user_key"]
     cards = scorecards(uk)
 
@@ -448,7 +552,7 @@ def _close_my_day(uk, user, tasks):
         st.session_state["dsr_saved_date"] = TODAY_STR
 
     fa = st.columns(2)
-    fa[0].download_button("⬇️ Download DSR (Word)",
+    fa[0].download_button("⬇️ Download day report (Word)",
                           data=dsr_bytes,
                           file_name=f"DSR_{user['user_key']}_{TODAY_STR}.docx",
                           mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -461,8 +565,19 @@ def _close_my_day(uk, user, tasks):
         st.session_state["last_backup_ts"] = _t.time()
         (st.success if not err else st.warning)(
             f"Backed up {pushed} file(s)." if not err else f"Backup issue: {err}")
-    st.caption("DSR = a Word report of your day (targets vs achievement, tasks & cues, "
-               "meetings, reminders, monthly standing, and what's working). Saved automatically.")
+
+    # Close the day = download the report (above) + mark it closed, so tomorrow doesn't block.
+    if storage.is_day_closed(uk, TODAY_STR):
+        st.success("✅ Today is closed. Report saved & downloadable above.")
+    else:
+        st.caption("Download the report above, then close the day to wrap up.")
+        if st.button("🌙 Close the day", type="primary", key="close_today_btn",
+                     use_container_width=True):
+            storage.mark_day_closed(uk, TODAY_STR)
+            st.session_state["closeday_open"] = False
+            st.rerun()
+    st.caption("The day report covers targets vs achievement, tasks & cues, meetings, "
+               "reminders, monthly standing, and what's working. Saved automatically.")
 
 
 def _meeting_form(user):
@@ -820,15 +935,23 @@ def _buzzer(uk, user):
     </div>
     """, unsafe_allow_html=True)
 
-    # Optional sound/clip: muted video if a clip exists (plays visually), else attempt a
-    # short beep (may be blocked by autoplay rules — the flashing banner is the reliable cue).
-    import paths, os as _os
-    vid = _os.path.join(paths.base_dir(), "_common", "buzzer.mp4")
+    # Video buzzer — plays with SOUND (autoplay + unmuted). Note: browsers block UNMUTED
+    # autoplay until the user has interacted with the page, so sound is reliable after any
+    # click in the session; on a brand-new page load the browser may mute the first play.
+    # The flashing banner above is the always-reliable visual cue.
+    import os as _os
+    vid = _os.path.join(_os.path.dirname(__file__), "assets", "buzzer.mp4")
+    if not _os.path.exists(vid):   # fallback to a workspace copy if present
+        import paths
+        vid = _os.path.join(paths.base_dir(), "_common", "buzzer.mp4")
     if _os.path.exists(vid):
         try:
-            st.video(vid, autoplay=True, muted=True)
+            st.video(vid, autoplay=True, muted=False, loop=True)
         except TypeError:
-            st.video(vid)   # older Streamlit without autoplay arg
+            try:
+                st.video(vid, autoplay=True, muted=False)
+            except TypeError:
+                st.video(vid)   # older Streamlit without autoplay/muted args
     else:
         st.markdown(
             "<audio autoplay><source src='https://actions.google.com/sounds/v1/alarms/"
@@ -917,26 +1040,23 @@ def _mis_alert_banner(uk, user):
 
 
 def _prev_working_day(d):
-    """The previous Mon–Fri date before d."""
+    """The previous working day before d (only Sunday is treated as non-working)."""
     from datetime import timedelta
     p = d - timedelta(days=1)
-    while p.weekday() >= 5:        # Sat=5, Sun=6
+    while p.weekday() == 6:        # Sun=6 only
         p -= timedelta(days=1)
     return p
 
 
 def _should_show_close_my_day(uk):
     now = datetime.now()
-    if now.weekday() >= 5:                     # weekend → never
+    if now.weekday() == 6:                     # Sunday → never
         return False
     if now.hour >= 16:                         # after 4 PM → end-of-day wrap
         return True
-    if now.hour < 12:                          # morning → only if last day not closed
-        prev = _prev_working_day(now.date()).isoformat()
-        prog = storage.get_monthly_progress(uk, month=prev[:7])
-        closed = (not prog.empty) and (prog["date"] == prev).any()
-        return not closed
-    return False                               # midday → hidden
+    # earlier in the day → only if the previous working day wasn't closed
+    prev = _prev_working_day(now.date()).isoformat()
+    return not storage.is_day_closed(uk, prev)
 
 
 def communicate_view(user):
@@ -1041,64 +1161,16 @@ def communicate_view(user):
                 else "."
             st.caption(note)
 
-        mode = st.radio("Mode", ["Manual (click-to-send)", "Auto-send (WhatsApp Web)"],
-                        horizontal=True, key="comm_mode")
-
-        if mode.startswith("Manual"):
-            if media is not None:
-                st.warning("**Manual links can't carry media** — WhatsApp links are text-only. "
-                           "The text will pre-fill; attach the file yourself after it opens, "
-                           "or switch to **Auto-send** to send media + caption automatically.")
-            else:
-                st.caption("Each opens WhatsApp Web with the text pre-filled — tap send.")
-            for name, mob in selected:
-                st.link_button(f"Send to {name}", storage.wa_link(mob, _msg_for(name, mob)),
-                               use_container_width=True)
+        # Manual click-to-send only. (Auto-send via WhatsApp Web can't run on the hosted
+        # app — it needs a logged-in browser on the same machine — so it's removed.)
+        if media is not None:
+            st.warning("**Links can't carry media** — WhatsApp links are text-only. The text "
+                       "will pre-fill; attach the file yourself after WhatsApp opens.")
         else:
-            import whatsapp as wa
-            if wa.likely_server():
-                st.warning("**Auto-send can't run on the hosted app.** It needs your logged-in "
-                           "WhatsApp Web in a browser on the same computer. Use **Manual** here, "
-                           "or the WhatsApp Business API. (Auto-send works when you run the app locally.)")
-                return
-            if not wa.selenium_available():
-                st.error("Auto-send needs Selenium. `pip install selenium` (Chrome required), then restart.")
-                return
-            c = st.columns(2)
-            if c[0].button("🔑 Set up / check login"):
-                with st.spinner("Opening WhatsApp Web — scan the QR if asked…"):
-                    ok = wa.open_login()
-                (st.success if ok else st.warning)("WhatsApp Web logged in." if ok
-                                                   else "Not logged in yet — scan the QR.")
-            delay = c[1].slider("Delay (sec)", 3, 30, 6)
-
-            media_path = None
-            if media is not None:
-                import tempfile, os as _os
-                ext = ".mp4" if kind == "video" else ".png"
-                media_path = _os.path.join(tempfile.gettempdir(), f"pmd_comm{ext}")
-                with open(media_path, "wb") as fh:
-                    fh.write(media.getvalue())
-
-            if st.button("🚀 Auto-send to selected", type="primary"):
-                # build per-recipient personalised messages
-                recipients = [(name, mob, _msg_for(name, mob)) for name, mob in selected]
-                bar = st.progress(0.0, text="Starting…"); logbox = st.empty(); lines_ = []
-
-                def _prog(done, total, name, ok):
-                    bar.progress(done / total, text=f"{done}/{total} — {name}")
-                    lines_.append(f"{'✅' if ok else '⚠️'} {name}")
-                    logbox.markdown("  \n".join(lines_[-12:]))
-
-                with st.spinner("Sending via WhatsApp Web…"):
-                    results = wa.send_bulk(recipients, base_msg, media_path, delay=delay, progress=_prog)
-                ok_n = sum(1 for _, o, _ in results if o)
-                st.success(f"Done — {ok_n}/{len(results)} sent.")
-                fails = [(n, e) for n, o, e in results if not o]
-                if fails:
-                    with st.expander(f"{len(fails)} not sent"):
-                        for n, e in fails:
-                            st.caption(f"{n}: {e}")
+            st.caption("Each opens WhatsApp with the text pre-filled — tap send.")
+        for name, mob in selected:
+            st.link_button(f"Send to {name}", storage.wa_link(mob, _msg_for(name, mob)),
+                           use_container_width=True)
 
 
 def settings_view(user):
@@ -1375,6 +1447,18 @@ def _mis_sync_panel(uk, user):
 
 
 def monthly_view(user):
+    # MIS backend isn't connected yet — show "coming soon" instead of empty targets/achievement.
+    st.markdown("### 🧭 Monthly — Targets & Achievement")
+    _mis_coming_soon(
+        "Big numbers, loading…",
+        "Month-to-date targets, achievement & trends are brewing. Hang tight — this one's "
+        "dropping soon. ✨",
+        ["🎯 MTD vs target", "⚡ Run-rate", "📊 Progress bars", "📈 MoM trend"],
+        tiles=4, emoji="🚀", status="brewing your monthly stats…")
+    return
+
+
+def _monthly_view_live(user):
     uk = user["user_key"]
     st.markdown("### 🧭 Monthly — Targets & Achievement")
     targets = storage.get_targets(uk, MONTH)
@@ -1917,6 +2001,58 @@ def _maybe_backup(uk):
             st.session_state["last_backup_info"] = f"backup failed: {e}"
 
 
+def _force_close_previous_day(user, prev_date):
+    """Blocking screen shown when the previous working day wasn't closed. The user must
+    close it (download its report) before they can use anything else."""
+    uk = user["user_key"]
+    nice = datetime.strptime(prev_date, "%Y-%m-%d").strftime("%A, %d %b")
+    st.markdown(f"""
+    <div style="border-radius:16px;padding:22px 20px;margin:8px 0 14px;
+      background:linear-gradient(135deg,#2D4A5E,#5367FC);color:#fff;text-align:center;">
+      <div style="font-size:1.6rem;">🌙</div>
+      <div style="font-size:1.3rem;font-weight:800;margin:6px 0 4px;">Close your last day first</div>
+      <div style="opacity:.92;font-size:.95rem;max-width:460px;margin:0 auto;">
+        You didn't close <b>{nice}</b>. Wrap it up and download the report to continue — this
+        keeps your record complete. The rest of the app unlocks once it's done.</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    month = prev_date[:7]
+    try:
+        dsr_bytes = dsr.build_docx(user, prev_date, month)
+    except Exception as e:
+        dsr_bytes = None
+        st.error(f"Couldn't build the report: {e}")
+
+    if dsr_bytes:
+        # save the report (text → cloud, plus local Word archive) once
+        if st.session_state.get("forceclose_saved") != prev_date:
+            try:
+                storage.save_dsr(uk, prev_date, dsr.docx_to_text(dsr_bytes))
+                import paths, os as _os
+                rep = paths.user_reports_dir(uk); _os.makedirs(rep, exist_ok=True)
+                with open(_os.path.join(rep, f"DSR_{prev_date}.docx"), "wb") as fh:
+                    fh.write(dsr_bytes)
+            except Exception:
+                pass
+            st.session_state["forceclose_saved"] = prev_date
+
+        st.download_button("⬇️ Download the day's report", data=dsr_bytes,
+                           file_name=f"DSR_{uk}_{prev_date}.docx",
+                           mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                           use_container_width=True)
+        st.caption("Download the report, then close the day below.")
+        if st.button(f"✅ Close {nice} & continue", type="primary", use_container_width=True):
+            storage.mark_day_closed(uk, prev_date)
+            st.session_state.pop("forceclose_saved", None)
+            st.rerun()
+    else:
+        # report couldn't build — still let them close so they aren't permanently locked out
+        if st.button(f"✅ Mark {nice} closed & continue", type="primary", use_container_width=True):
+            storage.mark_day_closed(uk, prev_date)
+            st.rerun()
+
+
 def main():
     style.inject()
     if "user" not in st.session_state:
@@ -1956,6 +2092,15 @@ def main():
         if st.button("Log out", use_container_width=True):
             del st.session_state.user
             st.rerun()
+
+    # GATE: if the previous working day wasn't closed, force-close it first — block every
+    # other screen until it's done. (Only Sunday is a non-working day.)
+    uk = user["user_key"]
+    if datetime.now().weekday() != 6:
+        prev = _prev_working_day(date.today()).isoformat()
+        if not storage.is_day_closed(uk, prev):
+            _force_close_previous_day(user, prev)
+            return
 
     # Row 2: full-width nav (single clean row)
     choice = header_nav(is_lead)
