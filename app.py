@@ -25,9 +25,11 @@ import streamlit as st
 import pandas as pd
 
 import storage
+import schemas
 import nudge
 import ai
 import retrieval
+import classify
 import report
 import workspace as ws
 import style
@@ -594,6 +596,8 @@ def _close_my_day(uk, user, tasks):
         if st.button("🌙 Close the day", type="primary", key="close_today_btn",
                      use_container_width=True):
             storage.mark_day_closed(uk, TODAY_STR)
+            # classify today's unassigned tasks into KRAs (one batched AI call; never blocks)
+            _resolve_kras_with_ai(uk, storage.get_tasks(uk, TODAY_STR))
             st.session_state["closeday_open"] = False
             st.rerun()
     st.caption("The day report covers targets vs achievement, tasks & cues, meetings, "
@@ -1631,6 +1635,190 @@ def _mis_sync_panel(uk, user):
         st.rerun()
 
 
+def _resolve_kras_with_ai(uk, tasks_df):
+    """Run AI KRA classification on the UNASSIGNED tasks in tasks_df and store the result
+    on each task (kra_resolved). Returns how many were newly assigned. Never raises — if AI
+    is unavailable or fails, returns 0 and leaves tasks unassigned."""
+    try:
+        kpis = _effort_kpi_names(uk)
+        pending = classify.unassigned_tasks(tasks_df, kpis)
+        if not pending:
+            return 0
+        assigned = ai.classify_kras_ai(pending, kpis)
+        n = 0
+        for tid, kra in assigned.items():
+            try:
+                storage.update_task(uk, tid, kra_resolved=kra)
+                n += 1
+            except Exception:
+                pass
+        return n
+    except Exception:
+        return 0
+
+
+def _effort_kpi_names(uk):
+    """The user's KRA columns = distinct KPI names from their monthly targets (any month)."""
+    names = []
+    try:
+        df = storage._read(storage._targets_path(uk), schemas.MONTHLY_TARGETS)
+        if not df.empty:
+            for n in df["kpi_name"].tolist():
+                n = str(n).strip()
+                if n and n not in names:
+                    names.append(n)
+    except Exception:
+        pass
+    return names
+
+
+def _effort_cell_color(count, maxv):
+    """Warm-amber heatmap shade for a count (Sunrise palette)."""
+    if count <= 0 or maxv <= 0:
+        return "#FCFAF7", "#CBC3B8"   # bg, text(dot)
+    import math
+    inten = (count / maxv) ** 0.62
+    # interpolate cream -> amber -> deep amber
+    stops = [(0.0, (251, 244, 236)), (0.5, (244, 198, 144)), (0.8, (232, 131, 58)), (1.0, (199, 95, 35))]
+    for i in range(len(stops) - 1):
+        a, b = stops[i], stops[i + 1]
+        if inten <= b[0]:
+            f = (inten - a[0]) / (b[0] - a[0] or 1)
+            rgb = tuple(round(a[1][k] + f * (b[1][k] - a[1][k])) for k in range(3))
+            break
+    else:
+        rgb = stops[-1][1]
+    bg = "#%02X%02X%02X" % rgb
+    txt = "#FFFFFF" if inten > 0.55 else "#1B2733"
+    return bg, txt
+
+
+def effort_view(user):
+    uk = user["user_key"]
+    st.markdown("### ⚡ Where My Energy Goes")
+    st.caption("Effort type × KRA — how many tasks of each kind serve each goal, for the period you pick.")
+
+    # ---- date filter: quick chips + custom from/to ----
+    from datetime import timedelta
+    today = TODAY
+    state_key = "effort_range"
+    if state_key not in st.session_state:
+        st.session_state[state_key] = (today.replace(day=1), today)   # month-to-date default
+
+    chips = st.columns([1, 1, 1, 1, 3])
+    if chips[0].button("Today", key="eff_today", use_container_width=True):
+        st.session_state[state_key] = (today, today)
+    if chips[1].button("This Week", key="eff_week", use_container_width=True):
+        st.session_state[state_key] = (today - timedelta(days=today.weekday()), today)
+    if chips[2].button("This Month", key="eff_month", use_container_width=True):
+        st.session_state[state_key] = (today.replace(day=1), today)
+    if chips[3].button("All", key="eff_all", use_container_width=True):
+        st.session_state[state_key] = (date(2020, 1, 1), today)
+
+    d_from, d_to = st.session_state[state_key]
+    cc = st.columns([1, 1, 3])
+    nf = cc[0].date_input("From", value=d_from, key="eff_from")
+    nt = cc[1].date_input("To", value=d_to, key="eff_to")
+    if (nf, nt) != (d_from, d_to):
+        st.session_state[state_key] = (nf, nt)
+        d_from, d_to = nf, nt
+
+    # ---- gather tasks in range ----
+    fs, ts = d_from.strftime("%Y-%m-%d"), d_to.strftime("%Y-%m-%d")
+    tasks = storage.get_tasks_between(uk, fs, ts) if hasattr(storage, "get_tasks_between") else None
+    if tasks is None:
+        # fallback: read the store and filter by plan_date
+        df = storage._read(storage._tasks_path(uk), schemas.TASKS)
+        tasks = df[(df["plan_date"] >= fs) & (df["plan_date"] <= ts)] if not df.empty else df
+
+    kpis = _effort_kpi_names(uk)
+    rows, cols, counts, row_tot, col_tot, grand = classify.build_matrix(tasks, kpis)
+
+    if grand == 0:
+        st.info(f"No tasks between {fs} and {ts}. Pick a wider range, or add some tasks.")
+        return
+
+    maxv = max((counts[r][c] for r in rows for c in cols), default=0)
+    best_col = max(cols, key=lambda c: sum(1 for r in rows if counts[r][c] > 0))  # widest spread
+
+    # ---- render the matrix as an HTML heatmap ----
+    def pct(n):
+        return f"{round(n * 100 / grand)}%" if grand else "0%"
+
+    th = ("padding:10px 8px;font-size:12.5px;font-weight:700;color:#1B2733;"
+          "text-align:center;line-height:1.15;")
+    html = ['<div style="overflow-x:auto;"><table style="border-collapse:separate;'
+            'border-spacing:6px;width:100%;font-family:Inter,system-ui,sans-serif;">']
+    # header row
+    html.append('<tr><td style="width:150px;"></td>')
+    for c in cols:
+        accent = ("border-bottom:3px solid #2E9E6B;" if c == best_col else "")
+        html.append(f'<td style="{th}{accent}">{c}</td>')
+    html.append('<td style="' + th + 'color:#2D4A5E;">TOTAL</td></tr>')
+    # body
+    for r in rows:
+        html.append('<tr>')
+        html.append(f'<td style="padding:8px 10px;font-size:13px;font-weight:600;'
+                    f'color:#1B2733;text-align:right;white-space:nowrap;">{r}</td>')
+        for c in cols:
+            v = counts[r][c]
+            bg, txt = _effort_cell_color(v, maxv)
+            cell = str(v) if v > 0 else "·"
+            fw = "700" if v > 0 else "400"
+            html.append(f'<td style="background:{bg};color:{txt};border-radius:10px;'
+                        f'text-align:center;font-size:15px;font-weight:{fw};height:48px;'
+                        f'min-width:62px;vertical-align:middle;">{cell}</td>')
+        # row total
+        rt = row_tot[r]
+        bar = int(48 * (rt / (max(row_tot.values()) or 1)))
+        html.append(f'<td style="background:#F1ECE4;border-radius:10px;text-align:center;'
+                    f'vertical-align:middle;min-width:62px;">'
+                    f'<div style="font-size:15px;font-weight:700;color:#2D4A5E;">{rt}</div>'
+                    f'<div style="font-size:10px;color:#5C6B7A;">{pct(rt)}</div></td>')
+        html.append('</tr>')
+    # total row
+    html.append('<tr><td style="padding:8px 10px;font-size:13px;font-weight:700;'
+                'color:#2D4A5E;text-align:right;">TOTAL</td>')
+    for c in cols:
+        ct = col_tot[c]
+        html.append(f'<td style="background:#F1ECE4;border-radius:10px;text-align:center;'
+                    f'vertical-align:middle;">'
+                    f'<div style="font-size:15px;font-weight:700;color:#2D4A5E;">{ct}</div>'
+                    f'<div style="font-size:10px;color:#5C6B7A;">{pct(ct)}</div></td>')
+    html.append(f'<td style="background:#2D4A5E;border-radius:10px;text-align:center;'
+                f'vertical-align:middle;">'
+                f'<div style="font-size:18px;font-weight:800;color:#fff;">{grand}</div>'
+                f'<div style="font-size:9.5px;color:#CFE0EA;">tasks</div></td></tr>')
+    html.append('</table></div>')
+    st.markdown("".join(html), unsafe_allow_html=True)
+
+    st.markdown('<div style="margin-top:14px;font-size:12px;color:#5C6B7A;">'
+                'Read a <b>column ↓</b> to see what kinds of effort a KRA gets · '
+                'read a <b>row →</b> to see where each effort type is spent · '
+                'cell shade = number of tasks · '
+                '<span style="color:#2E9E6B;">● widest effort spread</span></div>',
+                unsafe_allow_html=True)
+
+    # ---- unassigned + manual/AI resolution ----
+    pending = classify.unassigned_tasks(tasks, kpis)
+    if pending:
+        st.divider()
+        sc = st.columns([3, 1])
+        sc[0].caption(f"📌 {len(pending)} task(s) in this range have no KRA yet. "
+                      "They're auto-classified when you Close My Day. To classify older "
+                      "tasks too, set the range to **All** and tap Sync now — or assign "
+                      "them by hand on the History page.")
+        if sc[1].button("✨ Sync now", key="eff_sync", use_container_width=True,
+                        help="Run AI to assign KRAs to the unassigned tasks in this range"):
+            with st.spinner("Classifying…"):
+                n = _resolve_kras_with_ai(uk, tasks)
+            if n:
+                st.success(f"Assigned {n} task(s).")
+                st.rerun()
+            else:
+                st.info("Nothing could be auto-assigned — try assigning them on History.")
+
+
 def monthly_view(user):
     # MIS backend isn't connected yet — show "coming soon" instead of empty targets/achievement.
     st.markdown("### 🧭 Monthly — Targets & Achievement")
@@ -1920,6 +2108,35 @@ def history_view(user):
     st.markdown("### 🗒️ Task log")
     st.caption("Every task event — newest first. Reopen a closed task to bring it back to Open.")
 
+    # ---- assign KRAs to tasks that have none (feeds the Effort matrix) ----
+    all_tasks = storage.get_tasks(uk)
+    kpis = _effort_kpi_names(uk)
+    pend = classify.unassigned_tasks(all_tasks, kpis) if not all_tasks.empty else []
+    if pend:
+        kra_opts = list(kpis) + [classify.LEARNING_KRA]
+        with st.expander(f"🏷️ Assign a KRA — {len(pend)} task(s) need one", expanded=False):
+            st.caption("These tasks aren't linked to any goal yet, so they show as "
+                       "“Unassigned” in Where My Energy Goes. Pick the KRA each one served.")
+            # show the most recent ones first, cap the list so it stays manageable
+            pend_sorted = sorted(pend, key=lambda t: str(t.get("plan_date", "")), reverse=True)[:25]
+            for t in pend_sorted:
+                tid = t["task_id"]
+                cc = st.columns([4, 3, 1])
+                cc[0].markdown(f"**{t.get('title','(untitled)')}**  \n"
+                               f"<span style='color:#5C6B7A;font-size:12px;'>{t.get('plan_date','')}</span>",
+                               unsafe_allow_html=True)
+                choice = cc[1].selectbox("KRA", ["— pick —"] + kra_opts + ["Not goal-related"],
+                                         key=f"kra_pick_{tid}", label_visibility="collapsed")
+                if cc[2].button("Save", key=f"kra_save_{tid}"):
+                    if choice and choice != "— pick —":
+                        val = "" if choice == "Not goal-related" else choice
+                        # "Not goal-related" -> mark resolved as Unassigned so it stops re-appearing
+                        storage.update_task(uk, tid, kra_resolved=(val or "Unassigned"))
+                        st.success("Saved — Where My Energy Goes will reflect it.")
+                        st.rerun()
+                    else:
+                        st.warning("Pick a KRA first.")
+
     # reopen control for done/dropped tasks
     closed = storage.get_tasks(uk)
     closed = closed[closed["status"].isin(["Done", "Dropped"])] if not closed.empty else closed
@@ -2207,10 +2424,10 @@ def header_nav(is_lead, partner_ok=True):
     tabs.append("Records")
     if partner_ok:
         tabs.append("Communicate")
-    tabs += ["Monthly", "Learning", "History", "Settings"]
+    tabs += ["Monthly", "Effort", "Learning", "History", "Settings"]
     icon_map = {"Today": "columns-gap", "Daily log": "notebook", "Records": "address-book",
-                "Communicate": "send", "Monthly": "compass", "Learning": "lightbulb",
-                "History": "history", "Settings": "gear"}
+                "Communicate": "send", "Monthly": "compass", "Effort": "grid-3x3-gap-fill",
+                "Learning": "lightbulb", "History": "history", "Settings": "gear"}
     icons = [icon_map[t] for t in tabs]
     if HAVE_OPTION_MENU:
         return option_menu(
@@ -2300,6 +2517,7 @@ def _force_close_previous_day(user, prev_date):
         st.caption("Download the report, then close the day below.")
         if st.button(f"✅ Close {nice} & continue", type="primary", use_container_width=True):
             storage.mark_day_closed(uk, prev_date)
+            _resolve_kras_with_ai(uk, storage.get_tasks(uk, prev_date))
             st.session_state.pop("forceclose_saved", None)
             st.session_state.pop(ck, None)
             st.rerun()
@@ -2307,6 +2525,7 @@ def _force_close_previous_day(user, prev_date):
         # report couldn't build — still let them close so they aren't permanently locked out
         if st.button(f"✅ Mark {nice} closed & continue", type="primary", use_container_width=True):
             storage.mark_day_closed(uk, prev_date)
+            _resolve_kras_with_ai(uk, storage.get_tasks(uk, prev_date))
             st.rerun()
 
 
@@ -2382,8 +2601,8 @@ def main():
         choice = "Today"
 
     {"Today": today_view, "Daily log": daily_log_view, "Records": records_view,
-     "Communicate": communicate_view, "Monthly": monthly_view, "Learning": learning_view,
-     "History": history_view, "Settings": settings_view}.get(choice, today_view)(user)
+     "Communicate": communicate_view, "Monthly": monthly_view, "Effort": effort_view,
+     "Learning": learning_view, "History": history_view, "Settings": settings_view}.get(choice, today_view)(user)
 
 
 if __name__ == "__main__":

@@ -48,6 +48,7 @@ TASKS = [
     "source",               # ai / manual / carry_forward
     "notes", "raw_input",
     "created_at", "updated_at", "done_at",
+    "kra_resolved",          # KRA assigned by AI-at-close or manual History override ("" = none)
 ]
 
 # Daily targets — the 4 boxes at the top of the Today page. The gate: at least

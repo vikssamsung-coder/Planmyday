@@ -1020,6 +1020,57 @@ def distill_learnings(raw_learnings, role_prompt=""):
         return _fallback()
 
 
+KRA_CLASSIFY_SYSTEM = """You assign each work TASK to the single KRA (key result area / goal) it serves.
+
+You are given a list of tasks (each with an id and a title) and the list of valid KRAs for
+this person. For EACH task, choose the ONE KRA from the provided list that the task most
+directly advances.
+
+Rules:
+- You MUST pick a KRA from the provided list, OR the exact string "Unassigned" if the task
+  genuinely serves none of them. NEVER invent a KRA that isn't in the list.
+- "Self-Improvement" covers the person's own learning, upskilling, training themselves,
+  reading, practising a skill — work that builds THEM, not a business outcome. Use it for
+  those even though it may not be a formal KPI.
+- Judge by the task's intent, not surface words. A "call" can serve acquisition, revenue, or
+  servicing depending on what it's for — pick the best fit from the list.
+- If a task is purely administrative/operational with no clear goal, use "Unassigned".
+
+Return STRICT JSON, an object mapping each task id to its KRA, e.g.:
+{"assignments": {"rinku_0007": "New Partner Acquisition", "rinku_0008": "Self-Improvement", "rinku_0009": "Unassigned"}}"""
+
+
+def classify_kras_ai(tasks, kra_names):
+    """Batched AI KRA assignment. `tasks` is a list of dicts with 'task_id' and 'title'.
+    `kra_names` is the list of valid KRAs (KPI names + "Self-Improvement"). Returns a dict
+    {task_id: kra}. Only returns KRAs from the allowed list (or "Unassigned"); anything else
+    is dropped. Returns {} with no key or on any error, so callers never break.
+
+    Large sets (e.g. a full-history backfill) are split into bounded chunks so no single AI
+    call gets too big — each chunk is one call; a failed chunk is skipped, not fatal."""
+    items = [{"id": str(t.get("task_id", "")), "title": str(t.get("title", "")).strip()}
+             for t in (tasks or []) if str(t.get("task_id", "")).strip()]
+    if not items or not have_key():
+        return {}
+    allowed = set(str(k) for k in kra_names) | {"Self-Improvement", "Unassigned"}
+    kra_list = list(kra_names) + ["Self-Improvement"]
+
+    CHUNK = 40
+    out = {}
+    for i in range(0, len(items), CHUNK):
+        batch = items[i:i + CHUNK]
+        try:
+            data = _chat_json(KRA_CLASSIFY_SYSTEM,
+                              {"valid_kras": kra_list, "tasks": batch}, max_tokens=1100)
+            for tid, kra in (data.get("assignments") or {}).items():
+                kra = str(kra).strip()
+                if kra in allowed and kra != "Unassigned":
+                    out[str(tid)] = kra
+        except Exception:
+            continue   # skip this chunk, keep going
+    return out
+
+
 def daily_nudge(open_tasks=None, day_goals=None):
     """One short, personalised nudge for a popup. Reflects the person's role + accepted
     learnings (both injected into every call). Returns '' without a key or on error."""

@@ -91,6 +91,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     created_at TEXT,
     updated_at TEXT,
     done_at TEXT,
+    kra_resolved TEXT,
     PRIMARY KEY (user_key, task_id)
 );
 CREATE INDEX IF NOT EXISTS ix_tasks_user_key_plan_date ON tasks (user_key, plan_date);
