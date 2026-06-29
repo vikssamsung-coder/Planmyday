@@ -146,7 +146,10 @@ def unassigned_tasks(tasks_df, kpi_names):
 def build_matrix(tasks_df, kpi_names):
     """Return (rows, cols, counts, row_tot, col_tot, grand) for the matrix.
     counts is a dict[row][col] = int."""
-    cols = list(dict.fromkeys([str(k) for k in kpi_names if str(k).strip()])) + [LEARNING_KRA, UNASSIGNED]
+    cols = list(dict.fromkeys([str(k) for k in kpi_names if str(k).strip()]))
+    for special in (LEARNING_KRA, UNASSIGNED):
+        if special not in cols:
+            cols.append(special)
     rows = list(EFFORT_ROWS)
     counts = {r: {c: 0 for c in cols} for r in rows}
     if tasks_df is not None and len(tasks_df):

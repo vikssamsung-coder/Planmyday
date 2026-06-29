@@ -564,6 +564,26 @@ def plan_and_tasks(user, cards):
                     st.success("Task added.")
                     st.rerun()
 
+    # ---- scheduled ahead (reminders): future-dated tasks that auto-appear on their day ----
+    _allt = storage.get_tasks(uk)
+    if not _allt.empty:
+        ahead = _allt[(_allt["status"] == "Open") & (_allt["plan_date"] > TODAY_STR)]
+        if not ahead.empty:
+            with st.expander(f"🔔 Scheduled ahead ({len(ahead)})", expanded=False):
+                st.caption("Tasks you've scheduled for a future day. Each appears in Today "
+                           "automatically on its date — nothing to do now.")
+                ah = ahead[["plan_date", "title", "due_time"]].copy().sort_values("plan_date")
+                import datetime as _d2
+                def _nice(s):
+                    try:
+                        return _d2.datetime.strptime(str(s), "%Y-%m-%d").strftime("%a %d %b %Y")
+                    except Exception:
+                        return str(s)
+                ah["plan_date"] = ah["plan_date"].map(_nice)
+                ah["due_time"] = ah["due_time"].map(lambda t: f"⏰ {t}" if str(t).strip() else "")
+                ah.columns = ["Scheduled for", "Task", "Reminder"]
+                st.dataframe(ah, use_container_width=True, hide_index=True)
+
     # ---- coach nudge: any target with no task pointing at it? (normalized) ----
     tasks = storage.get_tasks(uk, TODAY_STR)
     if not tasks.empty:
@@ -1827,8 +1847,9 @@ def _resolve_kras_with_ai(uk, tasks_df):
         return 0
 
 
-def _effort_kpi_names(uk):
-    """The user's KRA columns = distinct KPI names from their monthly targets (any month)."""
+def _system_kra_names(uk):
+    """The system/official KRAs — the unique KPI names from the monthly target tracker
+    (pushed via MIS now, the CMS later)."""
     names = []
     try:
         df = storage._read(storage._targets_path(uk), schemas.MONTHLY_TARGETS)
@@ -1840,6 +1861,27 @@ def _effort_kpi_names(uk):
     except Exception:
         pass
     return names
+
+
+def _effort_kra_columns(uk):
+    """The Effort-matrix KRA columns = the UNIQUE union of system target KRAs + the user's own
+    added KRAs, in that order. Returns (all_columns, system_set) so the UI can mark which are
+    system-pushed vs user-added. Self-Improvement / Unassigned are added later by build_matrix."""
+    system = _system_kra_names(uk)
+    user_added = storage.get_effort_kras(uk)
+    seen = {s.lower() for s in system}
+    cols = list(system)
+    for u in user_added:                      # append user KRAs that aren't already system ones
+        if u.lower() not in seen:
+            cols.append(u); seen.add(u.lower())
+    return cols, set(system)
+
+
+def _effort_kpi_names(uk):
+    """KRA columns for the matrix = unique(system targets + user-added). Kept as a thin wrapper
+    so existing callers keep working."""
+    cols, _ = _effort_kra_columns(uk)
+    return cols
 
 
 def _effort_cell_color(count, maxv):
@@ -1902,6 +1944,7 @@ def effort_view(user):
         tasks = df[(df["plan_date"] >= fs) & (df["plan_date"] <= ts)] if not df.empty else df
 
     kpis = _effort_kpi_names(uk)
+    _, system_set = _effort_kra_columns(uk)
     rows, cols, counts, row_tot, col_tot, grand = classify.build_matrix(tasks, kpis)
 
     if grand == 0:
@@ -1923,7 +1966,13 @@ def effort_view(user):
     html.append('<tr><td style="width:150px;"></td>')
     for c in cols:
         accent = ("border-bottom:3px solid #2E9E6B;" if c == best_col else "")
-        html.append(f'<td style="{th}{accent}">{c}</td>')
+        if c in (classify.LEARNING_KRA, classify.UNASSIGNED):
+            tag = ""
+        elif c in system_set:
+            tag = '<div style="font-size:9px;color:#9AA7B2;font-weight:500;margin-top:2px;">system</div>'
+        else:
+            tag = '<div style="font-size:9px;color:#E8833A;font-weight:600;margin-top:2px;">+ yours</div>'
+        html.append(f'<td style="{th}{accent}">{c}{tag}</td>')
     html.append('<td style="' + th + 'color:#2D4A5E;">TOTAL</td></tr>')
     # body
     for r in rows:
@@ -1968,6 +2017,34 @@ def effort_view(user):
                 'cell shade = number of tasks · '
                 '<span style="color:#2E9E6B;">● widest effort spread</span></div>',
                 unsafe_allow_html=True)
+
+    # ---- edit which KRAs are columns (system + your own additions) ----
+    with st.expander("⚙️ Edit KRA columns"):
+        system = sorted(system_set)
+        if system:
+            st.caption("**System KRAs** (from your monthly targets — managed for you, shown "
+                       "automatically): " + " · ".join(system))
+        st.caption("Add your **own** KRAs below — one per line. These sit alongside the system "
+                   "ones and won't be overwritten by an MIS sync. (Self-Improvement and "
+                   "Unassigned are always shown automatically.)")
+        user_added = storage.get_effort_kras(uk)
+        txt = st.text_area("Your added KRAs (one per line)", value="\n".join(user_added),
+                           height=130, key="kra_edit_box",
+                           placeholder="e.g. Team Mentoring\nProcess Improvement")
+        ec = st.columns([1, 1, 2])
+        if ec[0].button("Save my KRAs", type="primary", key="kra_save_btn"):
+            skip = {s.lower() for s in system} | {classify.LEARNING_KRA.lower(),
+                                                  classify.UNASSIGNED.lower()}
+            new_names = [ln.strip() for ln in txt.splitlines()
+                         if ln.strip() and ln.strip().lower() not in skip]
+            storage.save_effort_kras(uk, new_names)
+            st.success("Your KRA columns updated.")
+            st.rerun()
+        if ec[1].button("Clear my additions", key="kra_reset_btn",
+                        help="Remove your own KRAs; system KRAs stay"):
+            storage.save_effort_kras(uk, [])
+            st.success("Cleared — only system KRAs remain.")
+            st.rerun()
 
     # ---- unassigned + manual/AI resolution ----
     pending = classify.unassigned_tasks(tasks, kpis)
@@ -2320,9 +2397,42 @@ def history_view(user):
                 st.success("Reopened — find it in Today.")
                 st.rerun()
 
+    # ---- tasks by status: Pending / Completed ----
+    st.markdown("##### Tasks")
+    if "hist_filter" not in st.session_state:
+        st.session_state.hist_filter = "Pending"
+    fc = st.columns([1, 1, 1, 3])
+    if fc[0].button("⏳ Pending", key="hf_pend", use_container_width=True):
+        st.session_state.hist_filter = "Pending"
+    if fc[1].button("✅ Completed", key="hf_done", use_container_width=True):
+        st.session_state.hist_filter = "Completed"
+    if fc[2].button("All", key="hf_all", use_container_width=True):
+        st.session_state.hist_filter = "All"
+    flt = st.session_state.hist_filter
+    allt = storage.get_tasks(uk)
+    if allt.empty:
+        st.caption("No tasks yet.")
+    else:
+        if flt == "Pending":
+            view = allt[allt["status"] == "Open"]
+        elif flt == "Completed":
+            view = allt[allt["status"] == "Done"]
+        else:
+            view = allt
+        if view.empty:
+            st.caption(f"No {flt.lower()} tasks.")
+        else:
+            tb = view[["plan_date", "title", "status", "day_goal"]].copy()
+            tb = tb.sort_values("plan_date", ascending=False)
+            tb.columns = ["Date", "Task", "Status", "Goal / KRA"]
+            st.dataframe(tb, use_container_width=True, hide_index=True)
+            st.caption(f"{len(view)} {flt.lower()} task(s)")
+    st.divider()
+
+    st.markdown("##### Activity log")
     log = storage.get_task_log(uk)
     if log.empty:
-        st.info("No history yet."); return
+        st.info("No activity yet."); return
     icon = {"created": "➕", "done": "✅", "carried": "↪", "deleted": "🗑",
             "steps_added": "🪜", "reopened": "↩️"}
     show = log[["ts", "event", "title", "day_goal", "detail"]].copy()

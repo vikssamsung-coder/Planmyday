@@ -361,3 +361,12 @@ CREATE TABLE IF NOT EXISTS learnings_digest (
     updated_at   TEXT,
     PRIMARY KEY (user_key)
 );
+
+-- 26. Effort KRAs (a user's own KRA list for the energy matrix; survives MIS overwrites) ---
+CREATE TABLE IF NOT EXISTS effort_kras (
+    user_key   TEXT,
+    kra_name   TEXT,
+    sort_order TEXT,
+    created_at TEXT,
+    PRIMARY KEY (user_key, kra_name)
+);

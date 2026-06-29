@@ -51,6 +51,10 @@ TASKS = [
     "kra_resolved",          # KRA assigned by AI-at-close or manual History override ("" = none)
 ]
 
+# A user's own KRA list for the "Where My Energy Goes" matrix. Independent of monthly_targets
+# (which the MIS sync overwrites), so the user's chosen columns survive MIS pulls.
+EFFORT_KRAS = ["user_key", "kra_name", "sort_order", "created_at"]
+
 # Daily targets — the 4 boxes at the top of the Today page. The gate: at least
 # one of these must exist before dictate unlocks and tasks can be added.
 DAY_GOALS = [

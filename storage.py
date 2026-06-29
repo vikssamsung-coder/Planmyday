@@ -425,6 +425,46 @@ def _targets_path(user_key):
     return os.path.join(_user_dir(user_key), "monthly_targets.xlsx")
 
 
+def _effort_kras_path(user_key):
+    return os.path.join(_user_dir(user_key), "effort_kras.xlsx")
+
+
+def get_effort_kras(user_key):
+    """The user's own KRA list for the Effort matrix, ordered. Returns [] if not customised
+    (caller then falls back to the monthly-target KPI names)."""
+    df = _read(_effort_kras_path(user_key), schemas.EFFORT_KRAS)
+    if df.empty:
+        return []
+    try:
+        df = df.copy()
+        df["__o"] = pd.to_numeric(df["sort_order"], errors="coerce").fillna(0)
+        df = df.sort_values("__o")
+    except Exception:
+        pass
+    out = []
+    for n in df["kra_name"].tolist():
+        n = str(n).strip()
+        if n and n not in out:
+            out.append(n)
+    return out
+
+
+def save_effort_kras(user_key, names):
+    """Replace the user's Effort-matrix KRA list. Pass [] to clear (revert to target KPIs)."""
+    rows = []
+    seen = set()
+    for i, n in enumerate(names):
+        n = str(n).strip()
+        if not n or n.lower() in seen:
+            continue
+        seen.add(n.lower())
+        rows.append({"user_key": user_key, "kra_name": n, "sort_order": str(i),
+                     "created_at": _now()})
+    df = pd.DataFrame(rows, columns=schemas.EFFORT_KRAS) if rows \
+        else pd.DataFrame(columns=schemas.EFFORT_KRAS)
+    _write(_effort_kras_path(user_key), df, schemas.EFFORT_KRAS)
+
+
 def get_targets(user_key, month):
     df = _read(_targets_path(user_key), schemas.MONTHLY_TARGETS)
     return df[df["month"] == month]
