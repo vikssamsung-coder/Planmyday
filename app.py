@@ -487,7 +487,7 @@ def plan_and_tasks(user, cards):
             role_prompt = storage.read_role_prompt(user["role"], uk)
             proposed = ai.generate_tasks(raw, user["role"], kpis, cards, TODAY_STR, role_prompt)
             proposed = [nudge.classify_task(t, kpis, acts) for t in proposed]
-            mis_ctx = _mis_cue_context(uk, user, cards)
+            mis_ctx = _mis_cue_context(uk, cards)
             for t in proposed:
                 t["plan_date"] = TODAY_STR
                 if not t.get("day_goal"):
@@ -696,11 +696,17 @@ def _close_my_day(uk, user, tasks):
     # ---- final actions: DSR (download + silent daily save) + backup ----
     st.divider()
     st.markdown("##### Finish")
-    dsr_bytes = dsr.build_docx(user, TODAY_STR, MONTH)
+    try:
+        dsr_bytes = dsr.build_docx(user, TODAY_STR, MONTH)
+    except Exception as e:
+        dsr_bytes = None
+        st.warning(f"Couldn't build the day report this time ({type(e).__name__}). "
+                   "You can still close the day below — the report will generate fine "
+                   "once the underlying data issue is sorted.")
 
     # save today's DSR silently (text → cloud-synced store + a local Word archive). Once
     # per session per day; no message — the user just sees the download button.
-    if st.session_state.get("dsr_saved_date") != TODAY_STR:
+    if dsr_bytes is not None and st.session_state.get("dsr_saved_date") != TODAY_STR:
         try:
             storage.save_dsr(uk, TODAY_STR, dsr.docx_to_text(dsr_bytes))
             # local Word archive in the user's reports folder
@@ -715,11 +721,14 @@ def _close_my_day(uk, user, tasks):
         st.session_state["dsr_saved_date"] = TODAY_STR
 
     fa = st.columns(2)
-    fa[0].download_button("⬇️ Download day report (Word)",
-                          data=dsr_bytes,
-                          file_name=f"DSR_{user['user_key']}_{TODAY_STR}.docx",
-                          mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                          type="primary", use_container_width=True)
+    if dsr_bytes is not None:
+        fa[0].download_button("⬇️ Download day report (Word)",
+                              data=dsr_bytes,
+                              file_name=f"DSR_{user['user_key']}_{TODAY_STR}.docx",
+                              mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                              type="primary", use_container_width=True)
+    else:
+        fa[0].button("⬇️ Day report unavailable", disabled=True, use_container_width=True)
     if fa[1].button("☁️ Back up to Google Sheets", key="closeday_backup",
                     use_container_width=True):
         with st.spinner("Backing up…"):
@@ -840,7 +849,7 @@ def _mis_context(cards):
     return "; ".join(bits) or "on track across KPIs"
 
 
-def _mis_cue_context(uk, user, cards):
+def _mis_cue_context(uk, cards):
     """Prefer the once-a-day grounded MIS brief (KB) for cue context; fall back to the
     live scorecard summary."""
     brief = storage.get_mis_brief(uk, TODAY_STR)
@@ -923,7 +932,7 @@ def _task_card(uk, t, headings, role_prompt=""):
                 rule = storage.best_rule(uk, topic)
                 rel = _task_relevant_context(uk, t["title"], new_goal)
                 new_cue = ai.companion_cue(t["title"], new_goal, role_prompt,
-                                           _mis_cue_context(uk, user, None),
+                                           _mis_cue_context(uk, None),
                                            rule["rule_text"] if rule else "",
                                            relevant_context=rel)
                 storage.update_task(uk, t["task_id"], coach_cue=new_cue)
@@ -931,43 +940,64 @@ def _task_card(uk, t, headings, role_prompt=""):
 
         # ---- reschedule (move to another day) + reminder time ----
         import datetime as _dt
-        dc = st.columns([2, 2, 3])
-        # date — postpone the task to another day
         cur_date = (t.get("plan_date") or TODAY_STR).strip()
         try:
             default_d = _dt.datetime.strptime(cur_date, "%Y-%m-%d").date()
         except Exception:
             default_d = TODAY
+        dc = st.columns([2, 5])
         new_date = dc[0].date_input("📅 Date", value=default_d, min_value=TODAY,
                                     key=f"date_{t['task_id']}", format="DD/MM/YYYY")
         new_date_str = new_date.strftime("%Y-%m-%d")
-        # time — reminder/buzzer time
-        cur_time = (t.get("due_time") or "").strip()
-        default_t = None
-        if cur_time:
-            for f in ("%H:%M", "%H:%M:%S"):
-                try:
-                    default_t = _dt.datetime.strptime(cur_time, f).time(); break
-                except Exception:
-                    pass
-        set_time = dc[1].time_input("⏰ Remind at", value=default_t,
-                                    key=f"due_{t['task_id']}", step=300)
-        new_time = set_time.strftime("%H:%M") if set_time else ""
 
-        changed = {}
-        if new_date_str != cur_date:
-            changed["plan_date"] = new_date_str
-        if new_time != cur_time:
-            changed["due_time"] = new_time
-        if changed:
-            storage.update_task(uk, t["task_id"], **changed)
-            if "plan_date" in changed and new_date_str != TODAY_STR:
-                st.toast(f"📅 Postponed to {new_date.strftime('%d %b %Y')}")
+        # reminder time — fast quick-picks instead of a scroll-through clock
+        cur_time = (t.get("due_time") or "").strip()
+        with dc[1]:
+            label = f"⏰ Reminder: **{cur_time}**" if cur_time else "⏰ Reminder: _none_"
+            st.caption(label)
+            qp = st.columns(6)
+            now_dt = _dt.datetime.now()
+            def _set_due(hhmm):
+                storage.update_task(uk, t["task_id"], due_time=hhmm, last_buzz_at="")
                 st.rerun()
-        if new_time:
-            dc[2].caption(f"Buzzer reminds you at {new_time} on "
-                          f"{new_date.strftime('%d %b')} and re-nags every 5 min "
-                          "until you post an update below.")
+            # relative quick-picks (same day) — the common "nudge me later today" case
+            if qp[0].button("+30m", key=f"q30_{t['task_id']}", help="Remind in 30 minutes"):
+                _set_due((now_dt + _dt.timedelta(minutes=30)).strftime("%H:%M"))
+            if qp[1].button("+1h", key=f"q1_{t['task_id']}", help="Remind in 1 hour"):
+                _set_due((now_dt + _dt.timedelta(hours=1)).strftime("%H:%M"))
+            if qp[2].button("+2h", key=f"q2_{t['task_id']}", help="Remind in 2 hours"):
+                _set_due((now_dt + _dt.timedelta(hours=2)).strftime("%H:%M"))
+            # fixed clock quick-picks (common reminder o'clocks)
+            if qp[3].button("12:00", key=f"qn_{t['task_id']}", help="Noon"):
+                _set_due("12:00")
+            if qp[4].button("17:00", key=f"qe_{t['task_id']}", help="5 PM"):
+                _set_due("17:00")
+            if cur_time and qp[5].button("✖", key=f"qx_{t['task_id']}", help="Clear reminder"):
+                _set_due("")
+            # exact time, only if they want it — compact hour:minute, no long scroll
+            with st.expander("Set an exact time"):
+                ec = st.columns([1, 1, 1])
+                ch, cm = 9, 0
+                if cur_time:
+                    try:
+                        ch, cm = int(cur_time[:2]), int(cur_time[3:5])
+                    except Exception:
+                        pass
+                hh = ec[0].selectbox("Hour", list(range(24)), index=ch,
+                                     key=f"hh_{t['task_id']}",
+                                     format_func=lambda x: f"{x:02d}")
+                mm = ec[1].selectbox("Min", [0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55],
+                                     index=[0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55].index(cm)
+                                     if cm in [0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55] else 0,
+                                     key=f"mm_{t['task_id']}")
+                if ec[2].button("Set", key=f"setexact_{t['task_id']}"):
+                    _set_due(f"{hh:02d}:{mm:02d}")
+
+        if new_date_str != cur_date:
+            storage.update_task(uk, t["task_id"], plan_date=new_date_str)
+            if new_date_str != TODAY_STR:
+                st.toast(f"📅 Postponed to {new_date.strftime('%d %b %Y')}")
+            st.rerun()
 
         # ---- Task update row (the act-to-stop signal) ----
         ups = storage.get_task_updates(uk, t["task_id"])
@@ -1106,17 +1136,31 @@ def _task_card(uk, t, headings, role_prompt=""):
 
 def _buzzer(uk, user):
     """Auto-refreshing reminder. Finds due tasks (act-to-stop) and pops a banner + plays
-    a video buzzer, re-nagging every 5 min until the user posts a Task update."""
-    import datetime as _dt
-    # auto-refresh every 60s so the clock is re-checked without a manual reload
-    # (kept at 60s, not less, to limit Google Sheets read volume / avoid 429 quota)
-    try:
-        from streamlit_autorefresh import st_autorefresh
-        st_autorefresh(interval=60000, key="buzz_tick")
-    except Exception:
-        st.markdown("<meta http-equiv='refresh' content='60'>", unsafe_allow_html=True)
+    an alarm, re-nagging every 5 min until the user posts a Task update. Runs on EVERY page
+    (called from main), and scans ALL dates so a reminder scheduled for any day — including
+    one missed while the app was closed — is never silently dropped.
 
-    due = storage.due_buzzing_tasks(uk, TODAY_STR)
+    Auto-refresh is activated only when there's a pending timed task (already due, or due
+    later today), so idle pages with no reminders don't refresh and can't interrupt a
+    long-running AI action."""
+    import datetime as _dt
+    now = _dt.datetime.now()
+
+    # keep the page checking only while there's something to watch (due or upcoming-today)
+    pending = storage.pending_buzzer_tasks(uk, now)
+    watch_today = any(
+        (_d := storage._due_dt(t)) and _d.date() == now.date() for t in pending
+    ) or any(
+        (_d := storage._due_dt(t)) and _d <= now for t in pending
+    )
+    if watch_today:
+        try:
+            from streamlit_autorefresh import st_autorefresh
+            st_autorefresh(interval=60000, key="buzz_tick")
+        except Exception:
+            st.markdown("<meta http-equiv='refresh' content='60'>", unsafe_allow_html=True)
+
+    due = storage.due_buzzing_tasks(uk)
     if not due:
         return
     for t in due:
@@ -1145,26 +1189,25 @@ def _buzzer(uk, user):
     </div>
     """, unsafe_allow_html=True)
 
-    # Video buzzer — plays with SOUND (autoplay + unmuted). Note: browsers block UNMUTED
-    # autoplay until the user has interacted with the page, so sound is reliable after any
-    # click in the session; on a brand-new page load the browser may mute the first play.
-    # The flashing banner above is the always-reliable visual cue.
+    # Alarm sound. Browsers (and Streamlit Cloud's iframe) block UNMUTED autoplay until the
+    # user has interacted with the page, so the flashing banner above is the reliable cue and
+    # the sound is best-effort. st.audio with autoplay+loop is the most reliable sound path.
     import os as _os
-    vid = _os.path.join(_os.path.dirname(__file__), "assets", "buzzer.mp4")
-    if not _os.path.exists(vid):   # fallback to a workspace copy if present
+    snd = _os.path.join(_os.path.dirname(__file__), "assets", "buzzer.mp4")
+    if not _os.path.exists(snd):
         import paths
-        vid = _os.path.join(paths.base_dir(), "_common", "buzzer.mp4")
-    if _os.path.exists(vid):
+        snd = _os.path.join(paths.base_dir(), "_common", "buzzer.mp4")
+    if _os.path.exists(snd):
         try:
-            st.video(vid, autoplay=True, muted=False, loop=True)
+            st.audio(snd, autoplay=True, loop=True)
         except TypeError:
             try:
-                st.video(vid, autoplay=True, muted=False)
+                st.audio(snd, autoplay=True)
             except TypeError:
-                st.video(vid)   # older Streamlit without autoplay/muted args
+                st.audio(snd)
     else:
         st.markdown(
-            "<audio autoplay><source src='https://actions.google.com/sounds/v1/alarms/"
+            "<audio autoplay loop><source src='https://actions.google.com/sounds/v1/alarms/"
             "beep_short.ogg' type='audio/ogg'></audio>", unsafe_allow_html=True)
 
 
@@ -1305,7 +1348,6 @@ def _maybe_nudge_popup(user):
 
 
 def today_view(user):
-    _buzzer(user["user_key"], user)
     _maybe_nudge_popup(user)
     _mis_alert_banner(user["user_key"], user)
     left, right = st.columns([1, 1], gap="large")
@@ -2851,6 +2893,11 @@ def main():
     partner_ok = _partner_features_allowed(user)
     choice = header_nav(is_lead, partner_ok)
     st.divider()
+
+    # Buzzer reminders — checked on EVERY page (not just Today) and across all dates, so a
+    # scheduled reminder is never missed because the user was on another tab. Runs after the
+    # force-close gate so it doesn't fight that flow.
+    _buzzer(uk, user)
 
     # Defensive: if a non-allowed user somehow lands on a gated view, send them to Today.
     if choice in ("Daily log", "Communicate") and not partner_ok:

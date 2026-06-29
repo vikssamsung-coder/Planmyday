@@ -822,6 +822,10 @@ def carry_forward(user_key, today):
         # roll it forward in place: retag date, remember origin
         df.loc[idx, "carried_from"] = t["carried_from"] or t["plan_date"]
         df.loc[idx, "plan_date"] = today
+        # the old reminder time was for the original day — drop it so a stale buzzer doesn't
+        # fire immediately on the new day (the user can set a fresh time if they still want one)
+        df.loc[idx, "due_time"] = ""
+        df.loc[idx, "last_buzz_at"] = ""
         df.loc[idx, "updated_at"] = _now()
         log_task_event(user_key, t["task_id"], t["title"], "carried",
                        t["day_goal"], detail=f"from {df.loc[idx,'carried_from']}")
@@ -1758,21 +1762,31 @@ def _due_dt(task):
     return None
 
 
-def due_buzzing_tasks(user_key, today_str, now=None):
-    """Tasks that are due (time passed), not done, and NOT acted-on since due —
-    and whose 5-minute re-nag window has elapsed. Returns list of task dicts."""
+def due_buzzing_tasks(user_key, today_str=None, now=None):
+    """Open tasks whose reminder time has PASSED and that haven't been acted on since —
+    with the 5-minute re-nag gate. Returns list of task dicts.
+
+    Scans ALL dates, not just today: a buzzer scheduled for a past day that was missed
+    (app closed / wrong page) still fires the next time the app is open, so a reminder is
+    never silently dropped. Future-scheduled reminders are correctly excluded (now < due).
+    `today_str` is accepted for backwards-compatibility but no longer limits the scan."""
     import datetime as _dt
     now = now or _dt.datetime.now()
-    df = get_tasks(user_key, today_str)
+    df = get_tasks(user_key)                       # ALL tasks, every date — nothing missed
     out = []
     if df.empty:
         return out
+    closed = closed_days_set(user_key)             # don't nag for days already wrapped
     for _, r in df.iterrows():
         t = r.to_dict()
         if t.get("status") in ("Done", "Dropped"):
             continue
+        if not str(t.get("due_time", "") or "").strip():
+            continue                               # no reminder time set -> not a buzzer
+        if str(t.get("plan_date", "") or "").strip() in closed:
+            continue                               # day is closed -> reminder retired
         due = _due_dt(t)
-        if not due or now < due:
+        if not due or now < due:                   # not due yet (incl. future-scheduled)
             continue
         # acted since due? (a remark logged at/after due silences it)
         last_up = (t.get("last_update_at") or "").strip()
@@ -1792,6 +1806,40 @@ def due_buzzing_tasks(user_key, today_str, now=None):
                 pass
         out.append(t)
     return out
+
+
+def pending_buzzer_tasks(user_key, now=None):
+    """Open tasks that have a reminder time set and are NOT yet acted on — whether the time
+    has already passed OR is still upcoming. Used to decide whether the page should keep
+    auto-refreshing so a buzzer fires on time and re-nags. Returns list of task dicts."""
+    import datetime as _dt
+    now = now or _dt.datetime.now()
+    df = get_tasks(user_key)
+    out = []
+    if df.empty:
+        return out
+    closed = closed_days_set(user_key)
+    for _, r in df.iterrows():
+        t = r.to_dict()
+        if t.get("status") in ("Done", "Dropped"):
+            continue
+        if not str(t.get("due_time", "") or "").strip():
+            continue
+        if str(t.get("plan_date", "") or "").strip() in closed:
+            continue
+        due = _due_dt(t)
+        if not due:
+            continue
+        last_up = (t.get("last_update_at") or "").strip()
+        if last_up:
+            try:
+                if _dt.datetime.fromisoformat(last_up) >= due:
+                    continue                       # already acted on since due
+            except Exception:
+                pass
+        out.append(t)
+    return out
+
 
 
 def mark_buzzed(user_key, task_id):
@@ -1843,6 +1891,14 @@ def mark_day_closed(user_key, date):
 def is_day_closed(user_key, date):
     df = _read(_closed_days_path(user_key), schemas.CLOSED_DAYS)
     return (not df.empty) and (df["date"] == date).any()
+
+
+def closed_days_set(user_key):
+    """All dates the user has closed, as a set — for cheap membership checks."""
+    df = _read(_closed_days_path(user_key), schemas.CLOSED_DAYS)
+    if df.empty:
+        return set()
+    return {str(d).strip() for d in df["date"].tolist()}
 
 
 # ---------------------------------------------------------------- step memory (reuse)
