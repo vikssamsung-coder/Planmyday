@@ -504,25 +504,55 @@ def get_tasks(user_key, plan_date=None):
     return df
 
 
-def add_tasks(user_key, tasks):
-    """tasks: list of dicts. Assigns task_id + timestamps. Saves all (never blocks)."""
+def _norm_title(s):
+    return " ".join(str(s or "").lower().split())
+
+
+def open_task_exists(user_key, title):
+    """True if an OPEN task with the same (normalised) title already exists — used to avoid
+    creating duplicate open tasks."""
+    df = _read(_tasks_path(user_key), schemas.TASKS)
+    if df.empty or "status" not in df.columns:
+        return False
+    nt = _norm_title(title)
+    if not nt:
+        return False
+    return any(_norm_title(t) == nt and str(s).strip() == "Open"
+               for t, s in zip(df["title"], df["status"]))
+
+
+def add_tasks(user_key, tasks, dedupe=True):
+    """tasks: list of dicts. Assigns task_id + timestamps. Saves all (never blocks).
+    When dedupe is True, a task whose title matches an existing OPEN task (case/space-
+    insensitive) is skipped so duplicates don't pile up. Duplicates within the same batch
+    are also collapsed. Returns the full tasks DataFrame."""
     df = _read(_tasks_path(user_key), schemas.TASKS)
     existing = len(df)
+    open_titles = set()
+    if dedupe and not df.empty and "status" in df.columns:
+        open_titles = {_norm_title(t) for t, s in zip(df["title"], df["status"])
+                       if str(s).strip() == "Open"}
     rows = []
-    for i, t in enumerate(tasks):
+    for t in tasks:
+        nt = _norm_title(t.get("title", ""))
+        if dedupe and nt and nt in open_titles:
+            continue  # skip duplicate of an existing open task
         row = {c: "" for c in schemas.TASKS}
         row.update(t)
-        row["task_id"] = t.get("task_id") or f"{user_key}_{existing + i + 1:04d}"
+        row["task_id"] = t.get("task_id") or f"{user_key}_{existing + len(rows) + 1:04d}"
         row["user_key"] = user_key
         row["status"] = t.get("status") or "Open"
         row["created_at"] = _now()
         row["updated_at"] = _now()
         rows.append(row)
-    df = pd.concat([df, pd.DataFrame(rows)], ignore_index=True)
-    _write(_tasks_path(user_key), df, schemas.TASKS)
-    for r in rows:
-        log_task_event(user_key, r["task_id"], r.get("title", ""), "created",
-                       r.get("day_goal", ""))
+        if nt:
+            open_titles.add(nt)  # collapse duplicates within this same batch too
+    if rows:
+        df = pd.concat([df, pd.DataFrame(rows)], ignore_index=True)
+        _write(_tasks_path(user_key), df, schemas.TASKS)
+        for r in rows:
+            log_task_event(user_key, r["task_id"], r.get("title", ""), "created",
+                           r.get("day_goal", ""))
     return df
 
 

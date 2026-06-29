@@ -344,6 +344,96 @@ def render_daily_targets(user):
     return headings
 
 
+def _apply_merge_plan(uk, mr, decisions):
+    """Apply the user-reviewed merge plan: skip duplicates, group/attach into headers with
+    subtasks (steps), add the rest. Unchecked suggestions fall back to adding individually."""
+    import json as _json
+    proposed = mr["proposed"]
+    plan = mr["plan"]
+    to_add, used = [], set()
+    for idx, a in enumerate(plan):
+        act = a.get("action")
+        new_idx = [i for i in a.get("new", []) if 0 <= i < len(proposed)]
+        on = decisions.get(idx, True)
+        if act == "skip" and on:
+            used.update(new_idx)                       # drop duplicates
+            continue
+        if act == "group" and on and new_idx:
+            base = dict(proposed[new_idx[0]])
+            base["title"] = a.get("header") or base.get("title", "")
+            subs = a.get("subtasks") or [proposed[i]["title"] for i in new_idx]
+            base["steps_json"] = _json.dumps([{"text": str(s), "done": False} for s in subs])
+            to_add.append(base)
+            used.update(new_idx)
+            continue
+        if act == "attach" and on and new_idx:
+            eid = a.get("existing_id")
+            subs = a.get("subtasks") or [proposed[i]["title"] for i in new_idx]
+            if eid:
+                try:
+                    storage.update_task(uk, eid, title=a.get("header", ""),
+                                        steps_json=_json.dumps([{"text": str(s), "done": False}
+                                                                for s in subs]))
+                except Exception:
+                    pass
+            used.update(new_idx)
+            continue
+        # add — or an unchecked skip/group/attach falls through to individual adds
+        for i in new_idx:
+            if i not in used:
+                to_add.append(proposed[i]); used.add(i)
+    # safety: anything the plan didn't mention gets added
+    for i, t in enumerate(proposed):
+        if i not in used:
+            to_add.append(t)
+    if to_add:
+        storage.add_tasks(uk, to_add, dedupe=True)
+
+
+def _render_merge_review(uk):
+    """If a dictation produced possible duplicates/groupings, show a review panel. Returns
+    True if the panel is showing (caller should pause the normal add flow)."""
+    mr = st.session_state.get("merge_review")
+    if not mr:
+        return False
+    proposed, plan = mr["proposed"], mr["plan"]
+    st.markdown("#### 📋 Review before adding")
+    st.caption("I spotted some duplicates or tasks that can be grouped. Untick anything you'd "
+               "rather keep separate, then confirm.")
+    decisions = {}
+    for idx, a in enumerate(plan):
+        act = a.get("action")
+        titles = [proposed[i]["title"] for i in a.get("new", []) if i < len(proposed)]
+        if act == "skip":
+            decisions[idx] = st.checkbox(
+                f"⏭️ Skip **{titles[0] if titles else '?'}** — looks like a duplicate of "
+                f"\"{a.get('duplicate_of', 'an existing task')}\"", value=True, key=f"mr_{idx}")
+        elif act == "group":
+            subs = a.get("subtasks") or titles
+            decisions[idx] = st.checkbox(
+                f"🗂️ Group {' + '.join(titles)} under **{a.get('header', 'Group')}** "
+                f"— subtasks: {', '.join(subs)}", value=True, key=f"mr_{idx}")
+        elif act == "attach":
+            subs = a.get("subtasks") or titles
+            decisions[idx] = st.checkbox(
+                f"🔗 Combine **{titles[0] if titles else '?'}** with your existing task under "
+                f"**{a.get('header', '')}** — subtasks: {', '.join(subs)}", value=True, key=f"mr_{idx}")
+        else:
+            st.markdown(f"➕ Add: {', '.join(titles)}")
+            decisions[idx] = True
+    c1, c2 = st.columns(2)
+    if c1.button("✅ Confirm", type="primary", key="mr_confirm", use_container_width=True):
+        _apply_merge_plan(uk, mr, decisions)
+        st.session_state.pop("merge_review", None)
+        st.rerun()
+    if c2.button("Add all as-is", key="mr_addall", use_container_width=True):
+        storage.add_tasks(uk, mr["proposed"], dedupe=True)
+        st.session_state.pop("merge_review", None)
+        st.rerun()
+    st.divider()
+    return True
+
+
 def plan_and_tasks(user, cards):
     uk = user["user_key"]
     st.markdown("### 🗂️ Today's targets & tasks")
@@ -354,6 +444,10 @@ def plan_and_tasks(user, cards):
         storage.carry_forward(uk, TODAY_STR)
         storage.run_due_message_schedules(uk, TODAY_STR)
         st.session_state.carried_today = True
+
+    # If a dictation produced possible duplicates/groupings, review them first.
+    if _render_merge_review(uk):
+        return
 
     headings = render_daily_targets(user)
     st.divider()
@@ -372,7 +466,7 @@ def plan_and_tasks(user, cards):
                            key="mic", format="wav")
         if rec and rec.get("bytes"):
             with st.spinner("Transcribing…"):
-                transcribed = ai.transcribe(rec["bytes"])
+                transcribed = ai.transcribe(rec["bytes"], vocab=_voice_vocab())
                 if transcribed:
                     # set state BEFORE the widget is instantiated (allowed)
                     st.session_state.plan_input = transcribed
@@ -408,7 +502,18 @@ def plan_and_tasks(user, cards):
                 t["coach_cue"] = ai.companion_cue(
                     t.get("title", ""), t.get("day_goal", ""), role_prompt,
                     mis_ctx, rule["rule_text"] if rule else "", relevant_context=rel)
-            storage.add_tasks(uk, proposed)   # autosave — no Save button
+            # semantic dedup / grouping — compare new tasks against existing open tasks
+            allt = storage.get_tasks(uk)
+            existing_open = ([{"id": r["task_id"], "title": r["title"]}
+                              for _, r in allt.iterrows()
+                              if str(r.get("status", "")).strip() == "Open"]
+                             if not allt.empty else [])
+            plan = ai.detect_merges([t["title"] for t in proposed], existing_open)
+            nontrivial = any(a.get("action") in ("skip", "group", "attach") for a in plan)
+            if nontrivial:
+                st.session_state["merge_review"] = {"proposed": proposed, "plan": plan}
+            else:
+                storage.add_tasks(uk, proposed, dedupe=True)
             st.session_state._clear_plan = True
             st.rerun()
 
@@ -417,9 +522,12 @@ def plan_and_tasks(user, cards):
         with st.form("manual_task", clear_on_submit=True):
             mt_title = st.text_input("Task", placeholder="e.g. Call 20 funded-not-traded clients")
             mc = st.columns([2, 1, 1, 1])
-            goal_opts = ["—"] + headings
-            mt_goal = mc[0].selectbox("Goal it serves", goal_opts,
-                                      help="Link it to one of today's targets, or leave —")
+            gk_opts = _goal_kra_options(uk, headings)
+            gk_labels = ["—"] + [o[0] for o in gk_opts]
+            gk_by_label = {o[0]: o for o in gk_opts}
+            mt_goal = mc[0].selectbox("Goal / KRA it serves", gk_labels,
+                                      help="Link it to one of today's targets, a KRA, "
+                                           "Self-Improvement, or leave —")
             mt_hz = mc[1].selectbox("Horizon", ["Today", "Build"],
                                     help="Delivers today, or builds toward a near-future goal")
             mt_pri = mc[2].selectbox("Priority", ["P1", "P2", "P3", "P4", "P5"], index=1)
@@ -428,12 +536,25 @@ def plan_and_tasks(user, cards):
             if st.form_submit_button("Add task", type="primary"):
                 if not mt_title.strip():
                     st.warning("Give the task a title.")
+                elif storage.open_task_exists(uk, mt_title.strip()):
+                    st.warning("You already have an open task with this title — not adding a duplicate.")
                 else:
+                    # route the choice to the right field
+                    day_goal, linked_kpi, kra_res = "", "", ""
+                    if mt_goal != "—":
+                        kind, value = gk_by_label[mt_goal][1], gk_by_label[mt_goal][2]
+                        if kind == "goal":
+                            day_goal = value
+                        elif kind == "kra":
+                            linked_kpi = value; kra_res = value      # explicit KRA pick
+                        elif kind == "learning":
+                            kra_res = "Self-Improvement"
                     task = {"title": mt_title.strip(), "plan_date": TODAY_STR,
-                            "day_goal": "" if mt_goal == "—" else mt_goal,
+                            "day_goal": day_goal, "linked_kpi": linked_kpi,
+                            "kra_resolved": kra_res,
                             "horizon": mt_hz, "priority": mt_pri, "source": "manual",
                             "due_time": mt_time.strftime("%H:%M") if mt_time else "",
-                            "goal_aligned": "Yes" if mt_goal != "—" else "No"}
+                            "goal_aligned": "No" if mt_goal == "—" else "Yes"}
                     # optional companion cue if a proven rule exists for this goal
                     topic = storage._topic_of(task["day_goal"], "")
                     rule = storage.best_rule(uk, topic)
@@ -628,7 +749,7 @@ def _meeting_form(user):
                            key="mtg_mic", format="wav")
         if rec and rec.get("bytes"):
             with st.spinner("Transcribing…"):
-                txt = ai.transcribe(rec["bytes"])
+                txt = ai.transcribe(rec["bytes"], vocab=_voice_vocab())
                 if txt:
                     st.session_state.mtg_raw = txt
     except Exception:
@@ -788,9 +909,19 @@ def _task_card(uk, t, headings, role_prompt=""):
                 storage.update_task(uk, t["task_id"], coach_cue=new_cue)
             st.rerun()
 
-        # ---- due time (reminder) ----
+        # ---- reschedule (move to another day) + reminder time ----
         import datetime as _dt
-        dc = st.columns([2, 3])
+        dc = st.columns([2, 2, 3])
+        # date — postpone the task to another day
+        cur_date = (t.get("plan_date") or TODAY_STR).strip()
+        try:
+            default_d = _dt.datetime.strptime(cur_date, "%Y-%m-%d").date()
+        except Exception:
+            default_d = TODAY
+        new_date = dc[0].date_input("📅 Date", value=default_d, min_value=TODAY,
+                                    key=f"date_{t['task_id']}", format="DD/MM/YYYY")
+        new_date_str = new_date.strftime("%Y-%m-%d")
+        # time — reminder/buzzer time
         cur_time = (t.get("due_time") or "").strip()
         default_t = None
         if cur_time:
@@ -799,13 +930,23 @@ def _task_card(uk, t, headings, role_prompt=""):
                     default_t = _dt.datetime.strptime(cur_time, f).time(); break
                 except Exception:
                     pass
-        set_time = dc[0].time_input("⏰ Remind at", value=default_t,
+        set_time = dc[1].time_input("⏰ Remind at", value=default_t,
                                     key=f"due_{t['task_id']}", step=300)
         new_time = set_time.strftime("%H:%M") if set_time else ""
+
+        changed = {}
+        if new_date_str != cur_date:
+            changed["plan_date"] = new_date_str
         if new_time != cur_time:
-            storage.update_task(uk, t["task_id"], due_time=new_time)
+            changed["due_time"] = new_time
+        if changed:
+            storage.update_task(uk, t["task_id"], **changed)
+            if "plan_date" in changed and new_date_str != TODAY_STR:
+                st.toast(f"📅 Postponed to {new_date.strftime('%d %b %Y')}")
+                st.rerun()
         if new_time:
-            dc[1].caption(f"Buzzer will remind you at {new_time} and re-nag every 5 min "
+            dc[2].caption(f"Buzzer reminds you at {new_time} on "
+                          f"{new_date.strftime('%d %b')} and re-nags every 5 min "
                           "until you post an update below.")
 
         # ---- Task update row (the act-to-stop signal) ----
@@ -1635,6 +1776,35 @@ def _mis_sync_panel(uk, user):
         st.rerun()
 
 
+def _goal_kra_options(uk, headings):
+    """One deduped list of everything a task can be mapped to: today's targets + the user's
+    KRAs + Self-Improvement. Returns list of (label, kind, value); kind in goal/kra/learning.
+    Exact (case/space-insensitive) overlaps between a target and a KRA are shown once."""
+    def _n(s):
+        return " ".join(str(s or "").lower().split())
+    opts, seen = [], set()
+    for h in headings:                       # today's targets first
+        if h and _n(h) not in seen:
+            opts.append((h, "goal", h)); seen.add(_n(h))
+    for k in _effort_kpi_names(uk):          # KRAs not already shown as a target
+        if k and _n(k) not in seen:
+            opts.append((f"{k}  ·  KRA", "kra", k)); seen.add(_n(k))
+    opts.append(("📘 Self-Improvement / Learning", "learning", "Self-Improvement"))
+    return opts
+
+
+def _voice_vocab():
+    """Team member names fed to the transcriber so they're spelled right, not guessed."""
+    try:
+        df = storage.get_team_roster()
+        if df.empty:
+            return ""
+        names = [str(n).strip() for n in df["name"].tolist() if str(n).strip()]
+        return ", ".join(names[:40])
+    except Exception:
+        return ""
+
+
 def _resolve_kras_with_ai(uk, tasks_df):
     """Run AI KRA classification on the UNASSIGNED tasks in tasks_df and store the result
     on each task (kra_resolved). Returns how many were newly assigned. Never raises — if AI
@@ -2191,7 +2361,7 @@ def _learn_dictate(uk, role):
                            key="log_mic", format="webm")
         if rec and rec.get("bytes"):
             with st.spinner("Transcribing…"):
-                txt = ai.transcribe(rec["bytes"])
+                txt = ai.transcribe(rec["bytes"], vocab=_voice_vocab())
             if txt:
                 st.session_state["log_text"] = (st.session_state.get("log_text", "") + " " + txt).strip()
     except Exception:

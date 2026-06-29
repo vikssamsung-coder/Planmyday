@@ -474,25 +474,39 @@ def break_into_steps(task_title, day_goal="", role_prompt="", past_steps=None):
 
 
 TRANSCRIBE_MODEL = os.environ.get("OPENAI_TRANSCRIBE_MODEL", "gpt-4o-mini-transcribe")
+TRANSCRIBE_LANG = os.environ.get("OPENAI_TRANSCRIBE_LANG", "en")  # "" = let model auto-detect
+
+# Domain vocabulary biases the model's spelling toward the names/jargon it would otherwise
+# guess phonetically — the single biggest accuracy win for proper nouns. Callers can extend
+# it (e.g. with the team roster) via the `vocab` argument.
+_BASE_VOCAB = ("Bigul, ZipTeam, NeoSapien, Sarthi, demat account, brokerage, sub-broker, "
+               "partner acquisition, KRA, KPI, MIS, DSR, funded not traded, AUM, SIP, "
+               "NSE, BSE, payout, ledger, dealer")
 
 
-def transcribe(audio_bytes, filename="speech.wav"):
-    """Transcribe recorded audio to text. Returns '' if no key or on error."""
+def transcribe(audio_bytes, filename="speech.wav", vocab=""):
+    """Transcribe recorded audio to text. Returns '' if no key or on error.
+    Passes a language hint and a domain-vocabulary prompt so Indian-English names and broking
+    jargon are spelled correctly instead of guessed phonetically."""
     if not have_key() or not audio_bytes:
         return ""
-    try:
+    prompt = _BASE_VOCAB + ((", " + vocab) if vocab else "")
+    lang = (TRANSCRIBE_LANG or "").strip() or None
+
+    def _call(model):
         import io
         from openai import OpenAI
-        client = OpenAI()
-        buf = io.BytesIO(audio_bytes)
-        buf.name = filename
-        r = client.audio.transcriptions.create(model=TRANSCRIBE_MODEL, file=buf)
-        return (r.text or "").strip()
+        buf = io.BytesIO(audio_bytes); buf.name = filename
+        kwargs = {"model": model, "file": buf, "prompt": prompt[:1000]}
+        if lang:
+            kwargs["language"] = lang
+        return (OpenAI().audio.transcriptions.create(**kwargs).text or "").strip()
+
+    try:
+        return _call(TRANSCRIBE_MODEL)
     except Exception:
         try:
-            buf = io.BytesIO(audio_bytes); buf.name = filename
-            r = client.audio.transcriptions.create(model="whisper-1", file=buf)
-            return (r.text or "").strip()
+            return _call("whisper-1")
         except Exception:
             return ""
 
@@ -1018,6 +1032,47 @@ def distill_learnings(raw_learnings, role_prompt=""):
         return brief or _fallback()
     except Exception:
         return _fallback()
+
+
+MERGE_DETECT_SYSTEM = """You keep a task list clean by spotting duplicates and groupable tasks.
+
+You are given NEW tasks just dictated (each has an index) and the EXISTING open tasks already
+on the list (each has an id). The same task may have been dictated again in different words or
+another language — those are DUPLICATES. Different tasks that share the same subject or contact
+(e.g. "Call Anil for payout" and "Call Anil for meeting") should be GROUPED under one header
+("Call Anil") with each purpose as a subtask.
+
+Return a plan covering the NEW tasks. Each new index 0..N-1 must appear in exactly ONE action:
+- {"action":"add","new":[i]} — keep task i as its own task
+- {"action":"skip","new":[i],"duplicate_of":"<title it repeats>"} — task i is a duplicate, drop it
+- {"action":"group","new":[i,j],"header":"Call Anil","subtasks":["Discuss payout","Discuss the meeting"]} — combine new tasks i and j under one header with these subtasks
+- {"action":"attach","new":[i],"existing_id":"<id>","header":"Call Anil","subtasks":["Discuss payout","Discuss the new topic"]} — new task i shares a subject with an EXISTING open task; combine under the header (the existing task becomes the header, so include its purpose as a subtask too)
+
+Rules:
+- Only group/attach when tasks genuinely share the same subject or contact. When unsure, "add".
+- Be conservative with "skip" — only when the meaning is truly the same.
+- subtasks are short action phrases, one per distinct purpose.
+- Every new index appears exactly once across all actions.
+
+Return STRICT JSON: {"plan":[ ...actions... ]}"""
+
+
+def detect_merges(new_titles, existing_open):
+    """new_titles: list[str] of the just-generated tasks. existing_open: list of {"id","title"}.
+    Returns a plan (list of action dicts). On no key / error, returns [] meaning 'add all as-is'."""
+    if not new_titles or not have_key():
+        return []
+    try:
+        payload = {
+            "new_tasks": [{"index": i, "title": t} for i, t in enumerate(new_titles)],
+            "existing_open_tasks": [{"id": e.get("id"), "title": e.get("title")}
+                                    for e in (existing_open or [])][:60],
+        }
+        data = _chat_json(MERGE_DETECT_SYSTEM, payload, max_tokens=900)
+        plan = data.get("plan")
+        return plan if isinstance(plan, list) else []
+    except Exception:
+        return []
 
 
 KRA_CLASSIFY_SYSTEM = """You assign each work TASK to the single KRA (key result area / goal) it serves.
