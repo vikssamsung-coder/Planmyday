@@ -1847,9 +1847,14 @@ def _resolve_kras_with_ai(uk, tasks_df):
         return 0
 
 
-def _system_kra_names(uk):
-    """The system/official KRAs — the unique KPI names from the monthly target tracker
-    (pushed via MIS now, the CMS later)."""
+def _effort_kra_columns(uk):
+    """The Effort-matrix KRA columns — a single, fully-editable list owned by the user. Seeds
+    from the monthly-target KPI names the first time (so existing columns aren't lost); after
+    the user saves, their list is the source of truth. Self-Improvement / Unassigned are added
+    by build_matrix."""
+    saved = storage.get_effort_kras(uk)
+    if saved:
+        return saved
     names = []
     try:
         df = storage._read(storage._targets_path(uk), schemas.MONTHLY_TARGETS)
@@ -1863,25 +1868,9 @@ def _system_kra_names(uk):
     return names
 
 
-def _effort_kra_columns(uk):
-    """The Effort-matrix KRA columns = the UNIQUE union of system target KRAs + the user's own
-    added KRAs, in that order. Returns (all_columns, system_set) so the UI can mark which are
-    system-pushed vs user-added. Self-Improvement / Unassigned are added later by build_matrix."""
-    system = _system_kra_names(uk)
-    user_added = storage.get_effort_kras(uk)
-    seen = {s.lower() for s in system}
-    cols = list(system)
-    for u in user_added:                      # append user KRAs that aren't already system ones
-        if u.lower() not in seen:
-            cols.append(u); seen.add(u.lower())
-    return cols, set(system)
-
-
 def _effort_kpi_names(uk):
-    """KRA columns for the matrix = unique(system targets + user-added). Kept as a thin wrapper
-    so existing callers keep working."""
-    cols, _ = _effort_kra_columns(uk)
-    return cols
+    """KRA columns for the matrix (thin wrapper so callers keep working)."""
+    return _effort_kra_columns(uk)
 
 
 def _effort_cell_color(count, maxv):
@@ -1944,7 +1933,6 @@ def effort_view(user):
         tasks = df[(df["plan_date"] >= fs) & (df["plan_date"] <= ts)] if not df.empty else df
 
     kpis = _effort_kpi_names(uk)
-    _, system_set = _effort_kra_columns(uk)
     rows, cols, counts, row_tot, col_tot, grand = classify.build_matrix(tasks, kpis)
 
     if grand == 0:
@@ -1966,13 +1954,7 @@ def effort_view(user):
     html.append('<tr><td style="width:150px;"></td>')
     for c in cols:
         accent = ("border-bottom:3px solid #2E9E6B;" if c == best_col else "")
-        if c in (classify.LEARNING_KRA, classify.UNASSIGNED):
-            tag = ""
-        elif c in system_set:
-            tag = '<div style="font-size:9px;color:#9AA7B2;font-weight:500;margin-top:2px;">system</div>'
-        else:
-            tag = '<div style="font-size:9px;color:#E8833A;font-weight:600;margin-top:2px;">+ yours</div>'
-        html.append(f'<td style="{th}{accent}">{c}{tag}</td>')
+        html.append(f'<td style="{th}{accent}">{c}</td>')
     html.append('<td style="' + th + 'color:#2D4A5E;">TOTAL</td></tr>')
     # body
     for r in rows:
@@ -2018,32 +2000,26 @@ def effort_view(user):
                 '<span style="color:#2E9E6B;">● widest effort spread</span></div>',
                 unsafe_allow_html=True)
 
-    # ---- edit which KRAs are columns (system + your own additions) ----
+    # ---- edit the KRA columns (all editable) ----
     with st.expander("⚙️ Edit KRA columns"):
-        system = sorted(system_set)
-        if system:
-            st.caption("**System KRAs** (from your monthly targets — managed for you, shown "
-                       "automatically): " + " · ".join(system))
-        st.caption("Add your **own** KRAs below — one per line. These sit alongside the system "
-                   "ones and won't be overwritten by an MIS sync. (Self-Improvement and "
-                   "Unassigned are always shown automatically.)")
-        user_added = storage.get_effort_kras(uk)
-        txt = st.text_area("Your added KRAs (one per line)", value="\n".join(user_added),
-                           height=130, key="kra_edit_box",
-                           placeholder="e.g. Team Mentoring\nProcess Improvement")
+        st.caption("These are the goal areas shown as columns. Edit the list — one KRA per "
+                   "line. (Self-Improvement and Unassigned are always shown automatically.)")
+        current = [c for c in cols if c not in (classify.LEARNING_KRA, classify.UNASSIGNED)]
+        txt = st.text_area("KRAs (one per line)", value="\n".join(current),
+                           height=160, key="kra_edit_box",
+                           placeholder="Revenue\nNew Partner Acquisition\nTeam Mentoring")
         ec = st.columns([1, 1, 2])
-        if ec[0].button("Save my KRAs", type="primary", key="kra_save_btn"):
-            skip = {s.lower() for s in system} | {classify.LEARNING_KRA.lower(),
-                                                  classify.UNASSIGNED.lower()}
+        if ec[0].button("Save KRAs", type="primary", key="kra_save_btn"):
+            skip = {classify.LEARNING_KRA.lower(), classify.UNASSIGNED.lower()}
             new_names = [ln.strip() for ln in txt.splitlines()
                          if ln.strip() and ln.strip().lower() not in skip]
             storage.save_effort_kras(uk, new_names)
-            st.success("Your KRA columns updated.")
+            st.success("KRA columns updated.")
             st.rerun()
-        if ec[1].button("Clear my additions", key="kra_reset_btn",
-                        help="Remove your own KRAs; system KRAs stay"):
+        if ec[1].button("Reset to my targets", key="kra_reset_btn",
+                        help="Clear your custom list and reseed from your MIS target KPIs"):
             storage.save_effort_kras(uk, [])
-            st.success("Cleared — only system KRAs remain.")
+            st.success("Reset to your target KPIs.")
             st.rerun()
 
     # ---- unassigned + manual/AI resolution ----
