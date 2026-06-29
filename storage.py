@@ -124,8 +124,19 @@ def _read(path, columns):
     # Postgres (Neon) backend — used on Cloud when NEON_DATABASE_URL is configured.
     if _use_pg():
         title, tab = _route(path)
+        # serve from the short-lived cache first — Streamlit reruns the whole script on every
+        # interaction and reads the same tables repeatedly; without this each read is a fresh
+        # round-trip to Neon (which may be far away), which is the main source of slowness.
+        cached = _cache_get(title, tab)
+        if cached is not None:
+            for c in columns:
+                if c not in cached.columns:
+                    cached[c] = ""
+            return cached[columns]
         try:
-            return db.read_table(tab, title, columns)
+            df = db.read_table(tab, title, columns)
+            _cache_put(title, tab, df)
+            return df
         except Exception:
             # if a Postgres read fails, fall through to the existing backends below
             pass
@@ -163,6 +174,7 @@ def _write(path, df, columns):
     if _use_pg():
         title, tab = _route(path)
         db.write_table(tab, title, df, columns)
+        _cache_put(title, tab, df[columns])   # keep cache fresh = next read needs no round-trip
         return
     if _cloud() and not local_first():
         title, tab = _route(path)
