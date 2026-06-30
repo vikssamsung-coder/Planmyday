@@ -450,6 +450,36 @@ def plan_and_tasks(user, cards):
         return
 
     headings = render_daily_targets(user)
+
+    # ---- action bar: Close your Day + Share Progress Brief (distinct slate colour) ----
+    st.markdown("""<style>
+    .st-key-bar_close_day button, .st-key-bar_share_brief button {
+      background:#2D4A5E !important; color:#fff !important; border:1px solid #2D4A5E !important;
+      font-weight:500 !important; }
+    .st-key-bar_close_day button:hover, .st-key-bar_share_brief button:hover {
+      background:#24414F !important; border-color:#24414F !important; color:#fff !important; }
+    </style>""", unsafe_allow_html=True)
+    _bar = st.columns(2)
+    if _bar[0].button("🌙 Close your Day", key="bar_close_day", use_container_width=True):
+        st.session_state["closeday_open"] = True
+        st.rerun()
+    if _bar[1].button("📤 Share Progress Brief", key="bar_share_brief", use_container_width=True):
+        try:
+            st.session_state["pb_bytes"] = dsr.build_docx(user, TODAY_STR, MONTH)
+            st.session_state["pb_date"] = TODAY_STR
+            st.session_state.pop("pb_err", None)
+        except Exception:
+            st.session_state["pb_bytes"] = None
+            st.session_state["pb_err"] = True
+    if st.session_state.get("pb_bytes") is not None and st.session_state.get("pb_date") == TODAY_STR:
+        st.download_button("⬇️ Download the Progress Brief (Word)",
+                           data=st.session_state["pb_bytes"],
+                           file_name=f"ProgressBrief_{uk}_{TODAY_STR}.docx",
+                           mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                           key="bar_pb_dl", use_container_width=True)
+    elif st.session_state.get("pb_err"):
+        st.caption("Couldn't build the Progress Brief just now — try again in a moment.")
+
     st.divider()
 
     # ---- the gate: no target -> no planning ----
@@ -603,7 +633,11 @@ def plan_and_tasks(user, cards):
         done_t = tasks[tasks["status"] == "Done"]
 
         role_prompt = storage.read_role_prompt(user["role"], uk)
-        st.markdown(f"##### Open · {len(open_t)}")
+        _oh = st.columns([5, 2])
+        _oh[0].markdown(f"##### Open · {len(open_t)}")
+        if _oh[1].button("⛶ Full screen", key="open_quadrants", use_container_width=True):
+            st.session_state["tasks_expanded"] = True
+            st.rerun()
         for _, t in open_t.iterrows():
             _task_card(uk, t, headings, role_prompt)
 
@@ -700,8 +734,8 @@ def _close_my_day(uk, user, tasks):
         dsr_bytes = dsr.build_docx(user, TODAY_STR, MONTH)
     except Exception as e:
         dsr_bytes = None
-        st.warning(f"Couldn't build the day report this time ({type(e).__name__}). "
-                   "You can still close the day below — the report will generate fine "
+        st.warning(f"Couldn't build the Progress Brief this time ({type(e).__name__}). "
+                   "You can still close the day below — the Progress Brief will generate fine "
                    "once the underlying data issue is sorted.")
 
     # save today's DSR silently (text → cloud-synced store + a local Word archive). Once
@@ -713,7 +747,7 @@ def _close_my_day(uk, user, tasks):
             import paths, os as _os
             rep_dir = paths.user_reports_dir(uk)
             _os.makedirs(rep_dir, exist_ok=True)
-            with open(_os.path.join(rep_dir, f"DSR_{TODAY_STR}.docx"), "wb") as _fh:
+            with open(_os.path.join(rep_dir, f"ProgressBrief_{TODAY_STR}.docx"), "wb") as _fh:
                 _fh.write(dsr_bytes)
             storage.sync_to_sheets(uk)   # silent, incremental push of the changed DSR store
         except Exception:
@@ -722,13 +756,13 @@ def _close_my_day(uk, user, tasks):
 
     fa = st.columns(2)
     if dsr_bytes is not None:
-        fa[0].download_button("⬇️ Download day report (Word)",
+        fa[0].download_button("⬇️ Download Progress Brief (Word)",
                               data=dsr_bytes,
-                              file_name=f"DSR_{user['user_key']}_{TODAY_STR}.docx",
+                              file_name=f"ProgressBrief_{user['user_key']}_{TODAY_STR}.docx",
                               mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                               type="primary", use_container_width=True)
     else:
-        fa[0].button("⬇️ Day report unavailable", disabled=True, use_container_width=True)
+        fa[0].button("⬇️ Progress Brief unavailable", disabled=True, use_container_width=True)
     if fa[1].button("☁️ Back up to Google Sheets", key="closeday_backup",
                     use_container_width=True):
         with st.spinner("Backing up…"):
@@ -740,9 +774,9 @@ def _close_my_day(uk, user, tasks):
 
     # Close the day = download the report (above) + mark it closed, so tomorrow doesn't block.
     if storage.is_day_closed(uk, TODAY_STR):
-        st.success("✅ Today is closed. Report saved & downloadable above.")
+        st.success("✅ Today is closed. Progress Brief saved & downloadable above.")
     else:
-        st.caption("Download the report above, then close the day to wrap up.")
+        st.caption("Download the Progress Brief above, then close the day to wrap up.")
         if st.button("🌙 Close the day", type="primary", key="close_today_btn",
                      use_container_width=True):
             storage.mark_day_closed(uk, TODAY_STR)
@@ -750,7 +784,7 @@ def _close_my_day(uk, user, tasks):
             _resolve_kras_with_ai(uk, storage.get_tasks(uk, TODAY_STR))
             st.session_state["closeday_open"] = False
             st.rerun()
-    st.caption("The day report covers targets vs achievement, tasks & cues, meetings, "
+    st.caption("The Progress Brief covers targets vs achievement, tasks & cues, meetings, "
                "reminders, monthly standing, and what's working. Saved automatically.")
 
 
@@ -938,60 +972,40 @@ def _task_card(uk, t, headings, role_prompt=""):
                 storage.update_task(uk, t["task_id"], coach_cue=new_cue)
             st.rerun()
 
-        # ---- reschedule (move to another day) + reminder time ----
+        # ---- reschedule (move to another day) + exact reminder time, one tight row ----
         import datetime as _dt
         cur_date = (t.get("plan_date") or TODAY_STR).strip()
         try:
             default_d = _dt.datetime.strptime(cur_date, "%Y-%m-%d").date()
         except Exception:
             default_d = TODAY
-        dc = st.columns([2, 5])
+        cur_time = (t.get("due_time") or "").strip()
+        dc = st.columns([3, 2, 2])
         new_date = dc[0].date_input("📅 Date", value=default_d, min_value=TODAY,
                                     key=f"date_{t['task_id']}", format="DD/MM/YYYY")
         new_date_str = new_date.strftime("%Y-%m-%d")
 
-        # reminder time — fast quick-picks instead of a scroll-through clock
-        cur_time = (t.get("due_time") or "").strip()
-        with dc[1]:
-            label = f"⏰ Reminder: **{cur_time}**" if cur_time else "⏰ Reminder: _none_"
-            st.caption(label)
-            qp = st.columns(6)
-            now_dt = _dt.datetime.now()
-            def _set_due(hhmm):
-                storage.update_task(uk, t["task_id"], due_time=hhmm, last_buzz_at="")
-                st.rerun()
-            # relative quick-picks (same day) — the common "nudge me later today" case
-            if qp[0].button("+30m", key=f"q30_{t['task_id']}", help="Remind in 30 minutes"):
-                _set_due((now_dt + _dt.timedelta(minutes=30)).strftime("%H:%M"))
-            if qp[1].button("+1h", key=f"q1_{t['task_id']}", help="Remind in 1 hour"):
-                _set_due((now_dt + _dt.timedelta(hours=1)).strftime("%H:%M"))
-            if qp[2].button("+2h", key=f"q2_{t['task_id']}", help="Remind in 2 hours"):
-                _set_due((now_dt + _dt.timedelta(hours=2)).strftime("%H:%M"))
-            # fixed clock quick-picks (common reminder o'clocks)
-            if qp[3].button("12:00", key=f"qn_{t['task_id']}", help="Noon"):
-                _set_due("12:00")
-            if qp[4].button("17:00", key=f"qe_{t['task_id']}", help="5 PM"):
-                _set_due("17:00")
-            if cur_time and qp[5].button("✖", key=f"qx_{t['task_id']}", help="Clear reminder"):
-                _set_due("")
-            # exact time, only if they want it — compact hour:minute, no long scroll
-            with st.expander("Set an exact time"):
-                ec = st.columns([1, 1, 1])
-                ch, cm = 9, 0
-                if cur_time:
-                    try:
-                        ch, cm = int(cur_time[:2]), int(cur_time[3:5])
-                    except Exception:
-                        pass
-                hh = ec[0].selectbox("Hour", list(range(24)), index=ch,
-                                     key=f"hh_{t['task_id']}",
-                                     format_func=lambda x: f"{x:02d}")
-                mm = ec[1].selectbox("Min", [0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55],
-                                     index=[0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55].index(cm)
-                                     if cm in [0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55] else 0,
-                                     key=f"mm_{t['task_id']}")
-                if ec[2].button("Set", key=f"setexact_{t['task_id']}"):
-                    _set_due(f"{hh:02d}:{mm:02d}")
+        # exact time: hour ("—" = no reminder) + minute. Applies on change; no extra button.
+        hours = ["—"] + [f"{h:02d}" for h in range(24)]
+        base_min = list(range(0, 60, 5))
+        cur_h, cur_m = "", ""
+        if len(cur_time) == 5 and cur_time[2] == ":":
+            cur_h, cur_m = cur_time[:2], cur_time[3:5]
+        if cur_m.isdigit() and int(cur_m) not in base_min:
+            base_min = sorted(set(base_min) | {int(cur_m)})   # keep an odd legacy minute exact
+        mins = [f"{m:02d}" for m in base_min]
+        h_idx = hours.index(cur_h) if cur_h in hours else 0
+        m_idx = mins.index(cur_m) if cur_m in mins else 0
+        hh = dc[1].selectbox("⏰ Hr", hours, index=h_idx, key=f"hh_{t['task_id']}")
+        mm = dc[2].selectbox("Min", mins, index=m_idx, key=f"mm_{t['task_id']}")
+        new_time = "" if hh == "—" else f"{hh}:{mm}"
+
+        if new_date_str != cur_date or new_time != cur_time:
+            storage.update_task(uk, t["task_id"], plan_date=new_date_str,
+                                due_time=new_time, last_buzz_at="")
+            if new_date_str != cur_date and new_date_str != TODAY_STR:
+                st.toast(f"📅 Postponed to {new_date.strftime('%d %b %Y')}")
+            st.rerun()
 
         if new_date_str != cur_date:
             storage.update_task(uk, t["task_id"], plan_date=new_date_str)
@@ -1347,7 +1361,84 @@ def _maybe_nudge_popup(user):
         storage.bump_popup_count(uk, TODAY_STR)
 
 
+def _quadrant_view(user):
+    """Full-width 'expand' view: today's open tasks grouped into target quadrants. Each daily
+    target is a cell holding the tasks that serve it; tasks serving no target land in an
+    'Unaligned' cell — the Gate made visual."""
+    uk = user["user_key"]
+    headings = storage.day_goal_headings(uk, TODAY_STR)
+    tasks = storage.get_tasks(uk, TODAY_STR)
+    open_t = tasks[~tasks["status"].isin(["Done", "Dropped"])] if not tasks.empty else tasks
+
+    top = st.columns([6, 1])
+    top[0].markdown("### 🎯 Today's tasks — by target")
+    if top[1].button("✖ Minimize", key="min_quadrants", use_container_width=True):
+        st.session_state["tasks_expanded"] = False
+        st.rerun()
+    st.caption("Each task sits under the target it moves. Tasks that serve none are flagged — "
+               "move, defer, or drop them.")
+
+    # group open tasks by the target they serve
+    groups = {h: [] for h in headings}
+    unaligned = []
+    if open_t is not None and not open_t.empty:
+        for _, t in open_t.iterrows():
+            dg = str(t.get("day_goal", "") or "")
+            matched = next((h for h in headings if nudge.goal_served(dg, [h])), None)
+            (groups[matched] if matched else unaligned).append(t)
+
+    cells = list(headings)
+    if unaligned:
+        cells.append("__unaligned__")
+    if not cells:
+        st.info("No targets set today — set targets on the normal view to organise by goal.")
+        return
+
+    def _q_task(t, muted=False):
+        mark = "◦" if muted else "•"
+        meta = f"  ·  ⏰ {t['due_time']}" if str(t.get("due_time", "") or "").strip() else ""
+        line = st.columns([6, 1])
+        line[0].markdown(f"{mark} {t['title']}{meta}")
+        if line[1].button("✓", key=f"qd_{t['task_id']}", help="Mark done"):
+            storage.update_task(uk, t["task_id"], status="Done")
+            st.rerun()
+        with line[0].popover("update / details"):
+            cue = str(t.get("coach_cue", "") or "")
+            if cue:
+                st.caption(f"💬 {cue}")
+            rmk = st.text_input("Post an update", key=f"qu_{t['task_id']}",
+                                placeholder="Quick remark to log progress / stop the buzzer")
+            if st.button("Save update", key=f"qus_{t['task_id']}") and rmk.strip():
+                storage.add_task_update(uk, t["task_id"], rmk.strip())
+                st.toast("Update logged.")
+                st.rerun()
+
+    # two quadrants per row
+    for i in range(0, len(cells), 2):
+        row = st.columns(2, gap="medium")
+        for j, cell in enumerate(cells[i:i + 2]):
+            with row[j]:
+                with st.container(border=True):
+                    if cell == "__unaligned__":
+                        st.markdown("⚠️ **Unaligned** · serves no target")
+                        for t in unaligned:
+                            _q_task(t, muted=True)
+                        st.caption("These don't ladder up to a target.")
+                    else:
+                        n = len(groups[cell])
+                        st.markdown(f"🎯 **{cell}** · {n} task{'s' if n != 1 else ''}")
+                        if n == 0:
+                            st.caption("No tasks yet for this target.")
+                        for t in groups[cell]:
+                            _q_task(t)
+
+
 def today_view(user):
+    uk = user["user_key"]
+    # full-width expand view (target quadrants) replaces the page when toggled on
+    if st.session_state.get("tasks_expanded"):
+        _quadrant_view(user)
+        return
     _maybe_nudge_popup(user)
     _mis_alert_banner(user["user_key"], user)
     left, right = st.columns([1, 1], gap="large")
@@ -1357,13 +1448,13 @@ def today_view(user):
         plan_and_tasks(user, cards)
 
     # Close My Day — a FOOTER you open with a button (so closing tasks never pops it open).
-    #  Shows weekdays after 4 PM, or in the morning if the last working day wasn't closed.
-    uk = user["user_key"]
-    if _should_show_close_my_day(uk):
+    #  Shows weekdays after 4 PM, in the morning if the last working day wasn't closed, OR
+    #  whenever the "Close your Day" bar set the flag.
+    if _should_show_close_my_day(uk) or st.session_state.get("closeday_open"):
         st.divider()
         if not st.session_state.get("closeday_open"):
             st.markdown('<div class="closeday-bar">🌙 Close My Day (Today)'
-                        '<span class="sub">Wrap up — today\'s numbers, cue check-ins, DSR & backup</span>'
+                        '<span class="sub">Wrap up — today\'s numbers, cue check-ins, Progress Brief & backup</span>'
                         '</div>', unsafe_allow_html=True)
             if st.button("🌙 Open Close My Day (Today)", use_container_width=True, key="open_closeday"):
                 st.session_state["closeday_open"] = True
@@ -2779,7 +2870,7 @@ def _force_close_previous_day(user, prev_date):
       <div style="font-size:1.6rem;">🌙</div>
       <div style="font-size:1.3rem;font-weight:800;margin:6px 0 4px;">Close your last day first</div>
       <div style="opacity:.92;font-size:.95rem;max-width:460px;margin:0 auto;">
-        You didn't close <b>{nice}</b>. Wrap it up and download the report to continue — this
+        You didn't close <b>{nice}</b>. Wrap it up and download the Progress Brief to continue — this
         keeps your record complete. The rest of the app unlocks once it's done.</div>
     </div>
     """, unsafe_allow_html=True)
@@ -2792,7 +2883,7 @@ def _force_close_previous_day(user, prev_date):
             st.session_state[ck] = dsr.build_docx(user, prev_date, month)
         except Exception as e:
             st.session_state[ck] = None
-            st.error(f"Couldn't build the report: {e}")
+            st.error(f"Couldn't build the Progress Brief: {e}")
     dsr_bytes = st.session_state[ck]
 
     if dsr_bytes:
@@ -2802,17 +2893,17 @@ def _force_close_previous_day(user, prev_date):
                 storage.save_dsr(uk, prev_date, dsr.docx_to_text(dsr_bytes))
                 import paths, os as _os
                 rep = paths.user_reports_dir(uk); _os.makedirs(rep, exist_ok=True)
-                with open(_os.path.join(rep, f"DSR_{prev_date}.docx"), "wb") as fh:
+                with open(_os.path.join(rep, f"ProgressBrief_{prev_date}.docx"), "wb") as fh:
                     fh.write(dsr_bytes)
             except Exception:
                 pass
             st.session_state["forceclose_saved"] = prev_date
 
-        st.download_button("⬇️ Download the day's report", data=dsr_bytes,
-                           file_name=f"DSR_{uk}_{prev_date}.docx",
+        st.download_button("⬇️ Download the Progress Brief", data=dsr_bytes,
+                           file_name=f"ProgressBrief_{uk}_{prev_date}.docx",
                            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                            use_container_width=True)
-        st.caption("Download the report, then close the day below.")
+        st.caption("Download the Progress Brief, then close the day below.")
         if st.button(f"✅ Close {nice} & continue", type="primary", use_container_width=True):
             storage.mark_day_closed(uk, prev_date)
             _resolve_kras_with_ai(uk, storage.get_tasks(uk, prev_date))
