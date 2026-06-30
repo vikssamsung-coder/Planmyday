@@ -38,9 +38,26 @@ def _cost(model, pin, pout):
 
 
 def record_usage(model, prompt_tokens, completion_tokens):
-    """Append token usage to a per-day, per-model JSON log (best-effort)."""
+    """Append token usage to a per-day, per-model JSON log (best-effort), AND persist it
+    per-user to the storage layer (Postgres when configured) so it survives restarts and is
+    cumulative day-wise for each user."""
     import json
     from datetime import date
+    # 1) per-user persisted store (the source of truth shown in Settings)
+    try:
+        import streamlit as st
+        uk = ""
+        try:
+            uk = (st.session_state.get("user") or {}).get("user_key", "") or ""
+        except Exception:
+            uk = ""
+        if uk:
+            import storage
+            storage.record_ai_usage(uk, model, prompt_tokens, completion_tokens,
+                                    _cost(model, prompt_tokens, completion_tokens))
+    except Exception:
+        pass
+    # 2) local JSON log (dev / offline fallback)
     try:
         p = _usage_path()
         os.makedirs(os.path.dirname(p), exist_ok=True)

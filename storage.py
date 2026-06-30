@@ -1901,6 +1901,88 @@ def closed_days_set(user_key):
     return {str(d).strip() for d in df["date"].tolist()}
 
 
+# ---------------------------------------------------------------- AI token usage (per user)
+
+def _ai_usage_path(user_key):
+    return os.path.join(_user_dir(user_key), "ai_usage.xlsx")
+
+
+def record_ai_usage(user_key, model, in_tokens, out_tokens, cost):
+    """Increment this user's token usage for today + model. Persisted to Postgres when
+    configured (so it survives restarts/redeploys) — cumulative, day-wise, per user."""
+    from datetime import date as _date
+    if not user_key:
+        return
+    try:
+        day = _date.today().isoformat()
+        df = _read(_ai_usage_path(user_key), schemas.AI_USAGE)
+        pin, pout, cst = int(in_tokens or 0), int(out_tokens or 0), float(cost or 0)
+        mask = None
+        if not df.empty:
+            mask = (df["day"].astype(str) == day) & (df["model"].astype(str) == str(model))
+        if df.empty or not mask.any():
+            row = {"day": day, "model": str(model), "calls": "1",
+                   "in_tokens": str(pin), "out_tokens": str(pout),
+                   "cost": f"{cst:.6f}", "user_key": user_key, "updated_at": _now()}
+            df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
+        else:
+            i = df[mask].index[0]
+            df.loc[i, "calls"] = str(int(float(df.loc[i, "calls"] or 0)) + 1)
+            df.loc[i, "in_tokens"] = str(int(float(df.loc[i, "in_tokens"] or 0)) + pin)
+            df.loc[i, "out_tokens"] = str(int(float(df.loc[i, "out_tokens"] or 0)) + pout)
+            df.loc[i, "cost"] = f"{float(df.loc[i, 'cost'] or 0) + cst:.6f}"
+            df.loc[i, "updated_at"] = _now()
+        _write(_ai_usage_path(user_key), df, schemas.AI_USAGE)
+    except Exception:
+        pass
+
+
+def ai_usage_summary(user_key):
+    """Per-user aggregates: {'today':..,'month':..,'total':..} each with calls/in/out/cost."""
+    from datetime import date as _date
+    blank = {"calls": 0, "in": 0, "out": 0, "cost": 0.0}
+    out = {"today": dict(blank), "month": dict(blank), "total": dict(blank)}
+    try:
+        df = _read(_ai_usage_path(user_key), schemas.AI_USAGE)
+    except Exception:
+        return out
+    if df.empty:
+        return out
+    today = _date.today().isoformat(); month = today[:7]
+    for _, r in df.iterrows():
+        day = str(r.get("day", ""))
+        calls = int(float(r.get("calls") or 0)); pin = int(float(r.get("in_tokens") or 0))
+        pout = int(float(r.get("out_tokens") or 0)); cost = float(r.get("cost") or 0)
+        for bucket, cond in (("total", True),
+                             ("month", day.startswith(month)),
+                             ("today", day == today)):
+            if cond:
+                out[bucket]["calls"] += calls; out[bucket]["in"] += pin
+                out[bucket]["out"] += pout; out[bucket]["cost"] += cost
+    return out
+
+
+def ai_usage_by_day(user_key, limit=14):
+    """Recent day-wise rollup for the user: list of {day, calls, tokens, cost}, newest first."""
+    try:
+        df = _read(_ai_usage_path(user_key), schemas.AI_USAGE)
+    except Exception:
+        return []
+    if df.empty:
+        return []
+    agg = {}
+    for _, r in df.iterrows():
+        day = str(r.get("day", ""))
+        if not day:
+            continue
+        a = agg.setdefault(day, {"day": day, "calls": 0, "tokens": 0, "cost": 0.0})
+        a["calls"] += int(float(r.get("calls") or 0))
+        a["tokens"] += int(float(r.get("in_tokens") or 0)) + int(float(r.get("out_tokens") or 0))
+        a["cost"] += float(r.get("cost") or 0)
+    rows = sorted(agg.values(), key=lambda x: x["day"], reverse=True)
+    return rows[:limit]
+
+
 # ---------------------------------------------------------------- step memory (reuse)
 
 def _step_templates_path(user_key):

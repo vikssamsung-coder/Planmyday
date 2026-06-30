@@ -1721,9 +1721,9 @@ def settings_view(user):
             st.warning("No AI key found — the app runs with simpler rule-based fallbacks. "
                        "Add OPENAI_API_KEY or ANTHROPIC_API_KEY to enable full coaching.")
 
-        # ---- token usage + spend ----
+        # ---- token usage + spend (per user, persisted, cumulative) ----
         st.markdown("#### AI usage & spend")
-        u = ai.usage_summary()
+        u = storage.ai_usage_summary(uk)
         def _tok(n):
             return f"{n/1000:.1f}K" if n < 1_000_000 else f"{n/1_000_000:.2f}M"
         c = st.columns(3)
@@ -1736,6 +1736,13 @@ def settings_view(user):
         st.caption(f"Tokens this month — in: {_tok(u['month']['in'])}, "
                    f"out: {_tok(u['month']['out'])}. Cost is an estimate from public "
                    "per-token rates and may differ from your provider invoice.")
+        days = storage.ai_usage_by_day(uk, limit=14)
+        if days:
+            with st.expander("Day-wise usage (last 14 days)"):
+                tb = pd.DataFrame([{"Date": d["day"], "Calls": d["calls"],
+                                    "Tokens": d["tokens"], "Cost ($)": round(d["cost"], 4)}
+                                   for d in days])
+                st.dataframe(tb, use_container_width=True, hide_index=True)
     except Exception:
         pass
 

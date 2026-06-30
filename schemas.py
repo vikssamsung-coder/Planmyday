@@ -180,6 +180,9 @@ DSR_LOG = ["date", "user_key", "report_text", "created_at"]
 # "close your previous day first" gate.
 CLOSED_DAYS = ["date", "user_key", "closed_at"]
 
+# per-user, per-day, per-model AI token usage + estimated spend (persisted, cumulative)
+AI_USAGE = ["day", "model", "calls", "in_tokens", "out_tokens", "cost", "user_key", "updated_at"]
+
 # Steps the USER wrote/edited for a task — remembered and reused for similar future tasks.
 STEP_TEMPLATES = ["template_id", "user_key", "topic", "task_title", "steps_json",
                   "source", "updated_at"]
