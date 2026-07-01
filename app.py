@@ -83,6 +83,19 @@ if "workspace_ready" not in st.session_state:
         st.session_state.ws_report = {"base_dir": "?", "created": [], "error": str(e)}
     st.session_state.workspace_ready = True
 
+# Ensure the Postgres schema exists (idempotent CREATE TABLE IF NOT EXISTS only — never
+# ALTERs an existing table). Runs once per session when Neon is configured, so brand-new
+# tables (e.g. content, ai_usage) appear without anyone hand-running SQL. Best-effort: if
+# the DB role lacks CREATE rights it's skipped quietly and the app still runs.
+if "schema_ready" not in st.session_state:
+    try:
+        if storage._use_pg():
+            import db as _db
+            _db.init_schema()
+    except Exception:
+        pass
+    st.session_state.schema_ready = True
+
 
 # ---------------------------------------------------------------- helpers
 
@@ -2940,10 +2953,27 @@ def _force_close_previous_day(user, prev_date):
 
 
 def _render_media(row):
-    """Render a content item's media: YouTube iframe, MP4 player, or image."""
+    """Render a content item's media: an uploaded image/MP4 (stored as a data URI),
+    a YouTube iframe, an MP4 player, or an image URL."""
     url = str(row.get("media_url", "") or "").strip()
     kind = str(row.get("media_kind", "") or "").strip() or storage._detect_media_kind(url)
     if not url or kind == "none":
+        return
+    # uploaded file, stored inline as a base64 data URI
+    if url.startswith("data:"):
+        import base64 as _b64
+        try:
+            head, b64 = url.split(",", 1)
+            data = _b64.b64decode(b64)
+        except Exception:
+            return
+        if head.startswith("data:video") or kind == "mp4":
+            try:
+                st.video(data)
+            except Exception:
+                pass
+        else:
+            st.image(data, use_container_width=True)
         return
     if kind == "youtube":
         vid = ""
@@ -3027,11 +3057,45 @@ def admin_view(user):
         ctype = st.selectbox("Type", _CONTENT_TYPES, key="adm_type")
         title = st.text_input("Title", key="adm_title")
         body = st.text_area("Body (supports markdown)", key="adm_body", height=120)
-        media_url = st.text_input("Media URL (YouTube or .mp4 or image) — optional",
-                                  key="adm_media",
-                                  placeholder="https://youtu.be/…  ·  https://….mp4  ·  https://….png")
-        if media_url.strip():
-            st.caption(f"Detected media: **{storage._detect_media_kind(media_url)}**")
+        st.markdown("**Media** (optional)")
+        msrc = st.radio("Media source", ["None", "Paste a link", "Upload a file"],
+                        horizontal=True, key="adm_msrc", label_visibility="collapsed")
+        media_url = ""
+        if msrc == "Paste a link":
+            media_url = st.text_input("Link (YouTube, or a direct image / .mp4 URL)",
+                                      key="adm_media",
+                                      placeholder="https://youtu.be/…  ·  https://….png  ·  https://….mp4")
+            if media_url.strip():
+                st.caption(f"Detected media: **{storage._detect_media_kind(media_url)}**")
+        elif msrc == "Upload a file":
+            up = st.file_uploader("Upload an image or a short MP4",
+                                  type=["png", "jpg", "jpeg", "gif", "webp",
+                                        "mp4", "webm", "mov"], key="adm_upl")
+            if up is not None:
+                data = up.getvalue()
+                mb = len(data) / (1024 * 1024)
+                mime = up.type or ""
+                is_video = mime.startswith("video") or up.name.lower().endswith(
+                    (".mp4", ".webm", ".mov"))
+                cap = 15 if is_video else 5
+                if mb > cap:
+                    st.warning(
+                        f"That file is {mb:.1f} MB — please keep "
+                        f"{'videos' if is_video else 'images'} under {cap} MB. "
+                        + ("For a longer video, upload it to YouTube and paste the link "
+                           "instead (that's the reliable way to host video)."
+                           if is_video else ""))
+                else:
+                    import base64 as _b64
+                    default_mime = "video/mp4" if is_video else "image/png"
+                    b64 = _b64.b64encode(data).decode()
+                    media_url = f"data:{mime or default_mime};base64,{b64}"
+                    if is_video:
+                        st.video(data)
+                    else:
+                        st.image(data, width=280)
+                    st.caption(f"Ready to attach — {mb:.1f} MB "
+                               f"{'video' if is_video else 'image'}.")
 
         # target
         users = storage.get_users()

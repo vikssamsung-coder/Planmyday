@@ -1994,6 +1994,10 @@ def _detect_media_kind(url):
     u = (url or "").strip().lower()
     if not u:
         return "none"
+    if u.startswith("data:image"):
+        return "image"
+    if u.startswith("data:video"):
+        return "mp4"
     if "youtube.com" in u or "youtu.be" in u:
         return "youtube"
     if u.endswith((".mp4", ".webm", ".mov", ".m4v")):
