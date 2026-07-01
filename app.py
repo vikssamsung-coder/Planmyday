@@ -67,6 +67,11 @@ PARTNER_FEATURE_USERS = {"rinku", "ketki"}
 
 def _partner_features_allowed(user):
     return (user or {}).get("user_key", "") in PARTNER_FEATURE_USERS
+
+
+def _is_admin(user):
+    """Admin = a dedicated login whose role is ADMIN. Sees only the CMS/admin module."""
+    return str((user or {}).get("role", "")).upper() == "ADMIN"
 MONTH = TODAY.strftime("%Y-%m")
 
 # First launch: build the workspace on disk (folders + Excel + md + role prompts),
@@ -450,6 +455,9 @@ def plan_and_tasks(user, cards):
         return
 
     headings = render_daily_targets(user)
+
+    # live admin banners (announcements) surface here
+    _today_banners(user)
 
     # ---- action bar: Close your Day + Share Progress Brief (distinct slate colour) ----
     st.markdown("""<style>
@@ -2811,19 +2819,25 @@ def team_view(user):
 
 # ================================================================ shell + header nav
 
-def header_nav(is_lead, partner_ok=True):
+def header_nav(is_lead, partner_ok=True, is_admin=False):
     """Single-row header tabs across the full content width. Daily log and Communicate are
-    shown only to users allowed the partner-acquisition surfaces."""
-    tabs = ["Today"]
-    if partner_ok:
-        tabs.append("Daily log")
-    tabs.append("Records")
-    if partner_ok:
-        tabs.append("Communicate")
-    tabs += ["Monthly", "Effort", "Learning", "History", "Settings"]
-    icon_map = {"Today": "columns-gap", "Daily log": "notebook", "Records": "address-book",
-                "Communicate": "send", "Monthly": "compass", "Effort": "grid-3x3-gap-fill",
-                "Learning": "lightbulb", "History": "history", "Settings": "gear"}
+    shown only to users allowed the partner-acquisition surfaces. An ADMIN login sees only
+    the Admin module."""
+    if is_admin:
+        tabs = ["Admin"]
+        icon_map = {"Admin": "shield-lock"}
+    else:
+        tabs = ["Today"]
+        if partner_ok:
+            tabs.append("Daily log")
+        tabs.append("Records")
+        if partner_ok:
+            tabs.append("Communicate")
+        tabs += ["Updates", "Monthly", "Effort", "Learning", "History", "Settings"]
+        icon_map = {"Today": "columns-gap", "Daily log": "notebook", "Records": "address-book",
+                    "Communicate": "send", "Updates": "megaphone", "Monthly": "compass",
+                    "Effort": "grid-3x3-gap-fill", "Learning": "lightbulb", "History": "history",
+                    "Settings": "gear"}
     icons = [icon_map[t] for t in tabs]
     if HAVE_OPTION_MENU:
         return option_menu(
@@ -2925,6 +2939,205 @@ def _force_close_previous_day(user, prev_date):
             st.rerun()
 
 
+def _render_media(row):
+    """Render a content item's media: YouTube iframe, MP4 player, or image."""
+    url = str(row.get("media_url", "") or "").strip()
+    kind = str(row.get("media_kind", "") or "").strip() or storage._detect_media_kind(url)
+    if not url or kind == "none":
+        return
+    if kind == "youtube":
+        vid = ""
+        if "youtu.be/" in url:
+            vid = url.split("youtu.be/")[1].split("?")[0].split("&")[0]
+        elif "watch?v=" in url:
+            vid = url.split("watch?v=")[1].split("&")[0]
+        elif "/embed/" in url:
+            vid = url.split("/embed/")[1].split("?")[0]
+        if vid:
+            st.markdown(
+                f'<div style="position:relative;padding-bottom:56.25%;height:0;overflow:hidden;'
+                f'border-radius:10px;"><iframe src="https://www.youtube.com/embed/{vid}" '
+                f'style="position:absolute;top:0;left:0;width:100%;height:100%;border:0;" '
+                f'allowfullscreen></iframe></div>', unsafe_allow_html=True)
+        else:
+            st.video(url)
+    elif kind == "mp4":
+        try:
+            st.video(url)
+        except Exception:
+            st.markdown(f"[▶ Watch video]({url})")
+    elif kind == "image":
+        st.image(url, use_container_width=True)
+
+
+def _content_card(row):
+    """Render one piece of content as a card (used in the Updates tab)."""
+    icon = {"banner": "📢", "video": "🎬", "contest": "🏆",
+            "result": "🥇", "update": "📣"}.get(row.get("type", "update"), "📣")
+    with st.container(border=True):
+        title = str(row.get("title", "") or "").strip()
+        if title:
+            st.markdown(f"#### {icon} {title}")
+        _render_media(row)
+        body = str(row.get("body", "") or "").strip()
+        if body:
+            st.markdown(body)
+        when = str(row.get("created_at", "") or "")[:10]
+        st.caption(f"{row.get('type','update').title()} · {when}")
+
+
+def _today_banners(user):
+    """Top-priority live banners surfaced on the Today page so announcements are seen."""
+    rows = storage.live_content_for(user["user_key"], types=["banner"])
+    for row in rows[:2]:
+        with st.container(border=True):
+            t = str(row.get("title", "") or "").strip()
+            b = str(row.get("body", "") or "").strip()
+            st.markdown(f"📢 **{t}**" if t else "📢")
+            _render_media(row)
+            if b:
+                st.markdown(b)
+
+
+def updates_view(user):
+    st.markdown("### 📣 Updates")
+    st.caption("Announcements, contests, results and posts from the team.")
+    rows = storage.live_content_for(user["user_key"])
+    if not rows:
+        st.info("No updates right now. Check back later.")
+        return
+    for row in rows:
+        _content_card(row)
+
+
+# ---------------------------------------------------------------- Admin / CMS module
+
+_CONTENT_TYPES = ["banner", "video", "contest", "result", "update"]
+
+
+def admin_view(user):
+    if not _is_admin(user):
+        st.error("Admins only."); return
+    st.markdown("### 🛡️ Admin — content & MIS")
+    tab_pub, tab_manage, tab_mis = st.tabs(["Publish", "Manage", "MIS push"])
+
+    # ---- Publish ----
+    with tab_pub:
+        st.caption("Create a banner, video, contest, result, or general update.")
+        ctype = st.selectbox("Type", _CONTENT_TYPES, key="adm_type")
+        title = st.text_input("Title", key="adm_title")
+        body = st.text_area("Body (supports markdown)", key="adm_body", height=120)
+        media_url = st.text_input("Media URL (YouTube or .mp4 or image) — optional",
+                                  key="adm_media",
+                                  placeholder="https://youtu.be/…  ·  https://….mp4  ·  https://….png")
+        if media_url.strip():
+            st.caption(f"Detected media: **{storage._detect_media_kind(media_url)}**")
+
+        # target
+        users = storage.get_users()
+        opts = ["all"] + ([str(u) for u in users["user_key"].tolist()] if not users.empty else [])
+        labels = {"all": "Everyone"}
+        if not users.empty:
+            for _, u in users.iterrows():
+                labels[u["user_key"]] = f"{u['name']} ({u['user_key']})"
+        target = st.selectbox("Show to", opts, format_func=lambda x: labels.get(x, x), key="adm_target")
+
+        c = st.columns(2)
+        priority = c[0].number_input("Priority (higher shows first)", 0, 100, 0, key="adm_prio")
+        import datetime as _dt
+        sched = c[1].checkbox("Schedule / expire", key="adm_sched")
+        publish_at = expires_at = ""
+        if sched:
+            sc = st.columns(2)
+            pd = sc[0].date_input("Publish on", value=TODAY, key="adm_pubd")
+            pt = sc[0].time_input("at", value=_dt.time(9, 0), key="adm_pubt", step=900)
+            publish_at = _dt.datetime.combine(pd, pt).isoformat(timespec="minutes")
+            use_exp = sc[1].checkbox("Set an expiry", key="adm_useexp")
+            if use_exp:
+                ed = sc[1].date_input("Expire on", value=TODAY + _dt.timedelta(days=7), key="adm_expd")
+                et = sc[1].time_input("at ", value=_dt.time(23, 59), key="adm_expt", step=900)
+                expires_at = _dt.datetime.combine(ed, et).isoformat(timespec="minutes")
+
+        b = st.columns(2)
+        if b[0].button("📤 Publish now", type="primary", key="adm_pub_now", use_container_width=True):
+            if not title.strip() and not body.strip() and not media_url.strip():
+                st.warning("Add a title, body, or media first.")
+            else:
+                storage.add_content({"type": ctype, "title": title.strip(), "body": body,
+                                     "media_url": media_url.strip(), "target": target,
+                                     "status": "published", "priority": priority,
+                                     "publish_at": publish_at, "expires_at": expires_at,
+                                     "created_by": user["user_key"]})
+                st.success("Published.")
+                st.rerun()
+        if b[1].button("💾 Save as draft", key="adm_pub_draft", use_container_width=True):
+            storage.add_content({"type": ctype, "title": title.strip(), "body": body,
+                                 "media_url": media_url.strip(), "target": target,
+                                 "status": "draft", "priority": priority,
+                                 "publish_at": publish_at, "expires_at": expires_at,
+                                 "created_by": user["user_key"]})
+            st.success("Saved as draft.")
+            st.rerun()
+
+    # ---- Manage ----
+    with tab_manage:
+        df = storage.get_content()
+        if df.empty:
+            st.info("No content yet — create some on the Publish tab.")
+        else:
+            df = df.sort_values("created_at", ascending=False)
+            st.caption(f"{len(df)} item(s).")
+            for _, r in df.iterrows():
+                row = r.to_dict()
+                stat = row.get("status", "draft")
+                badge = {"published": "🟢", "draft": "⚪", "archived": "🗄️"}.get(stat, "•")
+                tgt = row.get("target", "all")
+                with st.expander(f"{badge} {row.get('type','update').title()} · "
+                                 f"{row.get('title','(untitled)') or '(untitled)'} · "
+                                 f"{'Everyone' if tgt=='all' else tgt}"):
+                    if row.get("body"):
+                        st.markdown(row["body"])
+                    if row.get("media_url"):
+                        st.caption(f"Media: {row['media_kind']} · {row['media_url']}")
+                    mc = st.columns(4)
+                    cid = row["content_id"]
+                    if stat != "published":
+                        if mc[0].button("Publish", key=f"pub_{cid}"):
+                            storage.update_content(cid, status="published"); st.rerun()
+                    else:
+                        if mc[0].button("Unpublish", key=f"unp_{cid}"):
+                            storage.update_content(cid, status="draft"); st.rerun()
+                    if mc[1].button("Archive", key=f"arc_{cid}"):
+                        storage.update_content(cid, status="archived"); st.rerun()
+                    if mc[2].button("🗑 Delete", key=f"del_{cid}"):
+                        storage.delete_content(cid); st.rerun()
+
+    # ---- MIS push ----
+    with tab_mis:
+        st.caption("Upload the monthly MIS sheet — achievements are pushed into each user's "
+                   "targets. Same format the app's MIS sync expects (user / KPI / achieved).")
+        import mis_sync
+        up = st.file_uploader("MIS Excel (.xlsx)", type=["xlsx"], key="adm_mis_file")
+        month = st.text_input("Month (YYYY-MM)", value=MONTH, key="adm_mis_month")
+        if up is not None and st.button("Parse & preview", key="adm_mis_parse"):
+            try:
+                rows = mis_sync.parse(up.getvalue())
+                st.session_state["adm_mis_rows"] = rows
+                st.success(f"Parsed {len(rows)} row(s).")
+            except Exception as e:
+                st.error(f"Couldn't parse: {e}")
+        rows = st.session_state.get("adm_mis_rows")
+        if rows:
+            import pandas as _pd
+            st.dataframe(_pd.DataFrame(rows), use_container_width=True, hide_index=True)
+            if st.button("✅ Push to targets", type="primary", key="adm_mis_apply"):
+                applied, skipped, log = mis_sync.apply(rows, month.strip())
+                st.success(f"Applied {applied}, skipped {skipped}.")
+                with st.expander("Details"):
+                    st.write("\n".join(log[:200]))
+                st.session_state.pop("adm_mis_rows", None)
+
+
 def main():
     style.inject()
     if "user" not in st.session_state:
@@ -2989,21 +3202,26 @@ def main():
 
     # Row 2: full-width nav (single clean row)
     partner_ok = _partner_features_allowed(user)
-    choice = header_nav(is_lead, partner_ok)
+    is_admin = _is_admin(user)
+    choice = header_nav(is_lead, partner_ok, is_admin)
     st.divider()
 
     # Buzzer reminders — checked on EVERY page (not just Today) and across all dates, so a
     # scheduled reminder is never missed because the user was on another tab. Runs after the
     # force-close gate so it doesn't fight that flow.
-    _buzzer(uk, user)
+    if not is_admin:
+        _buzzer(uk, user)
 
-    # Defensive: if a non-allowed user somehow lands on a gated view, send them to Today.
+    # Defensive: route gated views back to a safe default.
     if choice in ("Daily log", "Communicate") and not partner_ok:
+        choice = "Today"
+    if choice == "Admin" and not is_admin:
         choice = "Today"
 
     {"Today": today_view, "Daily log": daily_log_view, "Records": records_view,
-     "Communicate": communicate_view, "Monthly": monthly_view, "Effort": effort_view,
-     "Learning": learning_view, "History": history_view, "Settings": settings_view}.get(choice, today_view)(user)
+     "Communicate": communicate_view, "Updates": updates_view, "Monthly": monthly_view,
+     "Effort": effort_view, "Learning": learning_view, "History": history_view,
+     "Settings": settings_view, "Admin": admin_view}.get(choice, today_view)(user)
 
 
 if __name__ == "__main__":

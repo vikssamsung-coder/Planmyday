@@ -112,7 +112,7 @@ def build_docx(user, date, month):
 
     k = doc.add_paragraph(); kr = k.add_run("PLAN MY DAY")
     kr.bold = True; kr.font.size = Pt(9); kr.font.color.rgb = RGBColor(0x8A, 0x56, 0x21)
-    title = doc.add_paragraph(); tr = title.add_run("Daily Status Report")
+    title = doc.add_paragraph(); tr = title.add_run("Progress Brief")
     tr.bold = True; tr.font.size = Pt(20); tr.font.color.rgb = INK
     title.paragraph_format.space_after = Pt(2)
     who = doc.add_paragraph(); wr = who.add_run(f"{name}  \u00b7  {role}")
@@ -173,9 +173,14 @@ def build_docx(user, date, month):
           "client": "Client", "internal": "Internal"}
     mrows = []
     for _, mtg in meetings.iterrows():
-        nxt = f"{mtg['next_action']} (by {mtg['next_date']})" if mtg["next_date"] else "\u2014"
-        mrows.append([tl.get(mtg["meeting_type"], mtg["meeting_type"]),
-                      mtg["identity_value"], mtg["outcome"] or "\u2014", nxt])
+        try:
+            nxt = (f"{mtg.get('next_action','')} (by {mtg.get('next_date','')})"
+                   if str(mtg.get("next_date", "") or "").strip() else "\u2014")
+            mrows.append([tl.get(mtg.get("meeting_type", ""), mtg.get("meeting_type", "") or "\u2014"),
+                          mtg.get("identity_value", "") or "\u2014",
+                          mtg.get("outcome", "") or "\u2014", nxt])
+        except Exception:
+            continue   # skip a malformed meeting row rather than failing the whole report
     _table(doc, ["Type", "Who", "Outcome", "Next action"],
            mrows or [["No meetings logged", "", "", ""]],
            widths=[1.4, 1.3, 1.8, 1.9])

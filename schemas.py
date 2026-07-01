@@ -183,6 +183,15 @@ CLOSED_DAYS = ["date", "user_key", "closed_at"]
 # per-user, per-day, per-model AI token usage + estimated spend (persisted, cumulative)
 AI_USAGE = ["day", "model", "calls", "in_tokens", "out_tokens", "cost", "user_key", "updated_at"]
 
+# CMS content published by an admin to the team (global table; targeted via `target`).
+# type: banner | video | contest | result | update
+# media_kind: youtube | mp4 | image | none ; target: all | <user_key> ; status: draft | published | archived
+CONTENT = [
+    "content_id", "type", "title", "body", "media_url", "media_kind",
+    "target", "status", "priority", "publish_at", "expires_at",
+    "created_by", "created_at", "updated_at",
+]
+
 # Steps the USER wrote/edited for a task — remembered and reused for similar future tasks.
 STEP_TEMPLATES = ["template_id", "user_key", "topic", "task_title", "steps_json",
                   "source", "updated_at"]

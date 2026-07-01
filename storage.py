@@ -13,6 +13,7 @@ Layout created on first run:
 
 import os
 import tempfile
+import uuid
 from datetime import datetime
 import pandas as pd
 
@@ -1981,6 +1982,132 @@ def ai_usage_by_day(user_key, limit=14):
         a["cost"] += float(r.get("cost") or 0)
     rows = sorted(agg.values(), key=lambda x: x["day"], reverse=True)
     return rows[:limit]
+
+
+# ---------------------------------------------------------------- CMS content (admin)
+
+def _content_path():
+    return os.path.join(_common_dir(), "content.xlsx")
+
+
+def _detect_media_kind(url):
+    u = (url or "").strip().lower()
+    if not u:
+        return "none"
+    if "youtube.com" in u or "youtu.be" in u:
+        return "youtube"
+    if u.endswith((".mp4", ".webm", ".mov", ".m4v")):
+        return "mp4"
+    if u.endswith((".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg")):
+        return "image"
+    return "none"
+
+
+def get_content():
+    """All CMS content rows (admin view)."""
+    return _read(_content_path(), schemas.CONTENT)
+
+
+def add_content(item):
+    """Insert a new content row. `item` is a dict of CONTENT fields. Returns the content_id."""
+    df = _read(_content_path(), schemas.CONTENT)
+    cid = item.get("content_id") or f"c_{uuid.uuid4().hex[:10]}"
+    media_url = (item.get("media_url") or "").strip()
+    row = {
+        "content_id": cid,
+        "type": item.get("type", "update"),
+        "title": item.get("title", ""),
+        "body": item.get("body", ""),
+        "media_url": media_url,
+        "media_kind": item.get("media_kind") or _detect_media_kind(media_url),
+        "target": item.get("target", "all") or "all",
+        "status": item.get("status", "draft"),
+        "priority": str(item.get("priority", "0") or "0"),
+        "publish_at": item.get("publish_at", ""),
+        "expires_at": item.get("expires_at", ""),
+        "created_by": item.get("created_by", ""),
+        "created_at": _now(),
+        "updated_at": _now(),
+    }
+    df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
+    _write(_content_path(), df, schemas.CONTENT)
+    return cid
+
+
+def update_content(content_id, **fields):
+    df = _read(_content_path(), schemas.CONTENT)
+    if df.empty:
+        return False
+    mask = df["content_id"].astype(str) == str(content_id)
+    if not mask.any():
+        return False
+    i = df[mask].index[0]
+    for k, v in fields.items():
+        if k in schemas.CONTENT:
+            df.loc[i, k] = v
+    if "media_url" in fields and "media_kind" not in fields:
+        df.loc[i, "media_kind"] = _detect_media_kind(fields["media_url"])
+    df.loc[i, "updated_at"] = _now()
+    _write(_content_path(), df, schemas.CONTENT)
+    return True
+
+
+def delete_content(content_id):
+    df = _read(_content_path(), schemas.CONTENT)
+    if df.empty:
+        return False
+    keep = df[df["content_id"].astype(str) != str(content_id)]
+    _write(_content_path(), keep, schemas.CONTENT)
+    return len(keep) < len(df)
+
+
+def _content_is_live(row, user_key, now=None):
+    """Published, within the publish/expire window, and targeted at this user."""
+    import datetime as _dt
+    now = now or _dt.datetime.now()
+    if str(row.get("status", "")) != "published":
+        return False
+    tgt = str(row.get("target", "all") or "all")
+    if tgt not in ("all", user_key):
+        return False
+    pa = str(row.get("publish_at", "") or "").strip()
+    if pa:
+        try:
+            if now < _dt.datetime.fromisoformat(pa):
+                return False
+        except Exception:
+            pass
+    ex = str(row.get("expires_at", "") or "").strip()
+    if ex:
+        try:
+            if now >= _dt.datetime.fromisoformat(ex):
+                return False
+        except Exception:
+            pass
+    return True
+
+
+def live_content_for(user_key, now=None, types=None):
+    """Currently-live content for a user, newest/highest-priority first. Optionally filter
+    to certain types (e.g. ['banner'] for the Today strip)."""
+    df = _read(_content_path(), schemas.CONTENT)
+    if df.empty:
+        return []
+    out = []
+    for _, r in df.iterrows():
+        row = r.to_dict()
+        if types and row.get("type") not in types:
+            continue
+        if _content_is_live(row, user_key, now):
+            out.append(row)
+    def _key(x):
+        try:
+            pr = int(float(x.get("priority", "0") or 0))
+        except Exception:
+            pr = 0
+        return (pr, str(x.get("created_at", "")))
+    out.sort(key=_key, reverse=True)
+    return out
 
 
 # ---------------------------------------------------------------- step memory (reuse)

@@ -311,6 +311,35 @@ CREATE TABLE IF NOT EXISTS closed_days (
     PRIMARY KEY (date, user_key)
 );
 
+CREATE TABLE IF NOT EXISTS ai_usage (
+    day TEXT,
+    model TEXT,
+    calls TEXT,
+    in_tokens TEXT,
+    out_tokens TEXT,
+    cost TEXT,
+    user_key TEXT,
+    updated_at TEXT,
+    PRIMARY KEY (user_key, day, model)
+);
+
+CREATE TABLE IF NOT EXISTS content (
+    content_id TEXT PRIMARY KEY,
+    type TEXT,
+    title TEXT,
+    body TEXT,
+    media_url TEXT,
+    media_kind TEXT,
+    target TEXT,
+    status TEXT,
+    priority TEXT,
+    publish_at TEXT,
+    expires_at TEXT,
+    created_by TEXT,
+    created_at TEXT,
+    updated_at TEXT
+);
+
 CREATE TABLE IF NOT EXISTS step_templates (
     template_id TEXT,
     user_key TEXT,
