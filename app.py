@@ -683,14 +683,13 @@ def plan_and_tasks(user, cards):
             st.session_state["tasks_expanded"] = True
             st.rerun()
         _inject_rail_css()
-        st.caption("Numbered down the rail by time — set a ⏰ on the rail to order your day.")
+        hdr2 = st.columns([5, 2])
+        hdr2[0].caption("Numbered by time · set a ⏰ on the rail — changing a time updates only that card.")
+        if hdr2[1].button("↕ Sort by time", key="sort_by_time", use_container_width=True):
+            st.rerun()
         open_sorted = _sort_open_by_time(open_t)
         for _n, (_, t) in enumerate(open_sorted.iterrows(), start=1):
-            rc = st.columns([1, 7], gap="small")
-            with rc[0]:
-                _task_rail(uk, t, _n, first=(_n == 1))
-            with rc[1]:
-                _task_card(uk, t["task_id"], headings, role_prompt)
+            _task_card(uk, t["task_id"], headings, role_prompt, seq=_n, first=(_n == 1))
 
         if not done_t.empty:
             with st.expander(f"Done · {len(done_t)}"):
@@ -996,8 +995,8 @@ def _inject_rail_css():
 def _task_rail(uk, t, idx, first=False):
     """The numbered time-rail node to the LEFT of a task card: order number + scheduled
     time, with a quick ⏰ setter so the day can be planned by time (list re-sorts on change).
-    Rendered by the PARENT (not the card fragment), so setting a time reruns the whole list
-    and re-orders it chronologically."""
+    Rendered INSIDE the card fragment, so setting a time reruns only this one card — the list
+    order is left as-is until the user presses "Sort by time"."""
     tid = t["task_id"]
     due = (t.get("due_time") or "").strip()
     timed = _has_time(due)
@@ -1024,11 +1023,11 @@ def _task_rail(uk, t, idx, first=False):
         new_time = "" if hh == "—" else f"{hh}:{mm}"
         if new_time != due:
             storage.update_task(uk, tid, due_time=new_time, last_buzz_at="")
-            st.rerun()   # parent scope -> the open list re-sorts by the new time
+            _rerun("fragment")   # refresh ONLY this card; press "Sort by time" to re-order the list
 
 
 @_fragment
-def _task_card(uk, task_id, headings, role_prompt=""):
+def _task_card(uk, task_id, headings, role_prompt="", seq=None, first=False):
     """One open/carried task as a COLLAPSIBLE fragment card.
 
     The card re-reads its own task (cache-backed) and reruns in ISOLATION (scope='fragment')
@@ -1051,233 +1050,238 @@ def _task_card(uk, task_id, headings, role_prompt=""):
     steps = _steps_of(t)
     cur_goal = t.get("day_goal", "") or ""
 
-    # ---- collapsed header label ----
-    bits = [("↪ " if carried else "") + t["title"]]
-    if steps:
-        done_n = sum(1 for s in steps if s.get("done"))
-        bits.append(f"{done_n}/{len(steps)} steps")
-    if cur_goal:
-        bits.append(f"🔗 {cur_goal}")
-    elif t.get("source") != "follow_up":
-        bits.append("⚠️ no goal")
-    if t.get("source") == "follow_up" and t.get("followup_for"):
-        bits.append(f"📞 {t['followup_for']}")
-    label = "  ·  ".join(bits)
+    _rc = st.columns([1, 7], gap="small")
+    with _rc[0]:
+        _task_rail(uk, t, seq or 1, first=first)
+    with _rc[1]:
 
-    # ---- always-visible gist ----
-    cue = (t.get("coach_cue") or "").strip()
-    if t.get("source") == "follow_up" and t.get("followup_for"):
-        ff = f"Follow up with {t['followup_for']}"
-        gist = f"{ff} — {cue}" if cue else ff
-    else:
-        gist = cue
-    if gist:
-        st.caption(f"💡 {gist[:110]}")
-
-    # ---- session-backed collapse (survives step-tick reruns) ----
-    open_key = f"open_{task_id}"
-    is_open = st.session_state.get(open_key, False)
-    if st.button(("▾ " if is_open else "▸ ") + label, key=f"tgl_{task_id}",
-                 use_container_width=True):
-        st.session_state[open_key] = not is_open
-        _rerun("fragment")
-    if not is_open:
-        return
-
-    with st.container(border=True):
-        tags = ["⚡ Today" if t.get("horizon") != "Build" else "🌱 Build"]
-        tags.append("🔗 " + cur_goal if cur_goal else "⚠️ No goal")
-        if t.get("source") == "follow_up" and t.get("followup_for"):
-            tags.append(f"📞 follow-up · {t['followup_for']}")
-        if carried:
-            tags.append(f"↪ carried from {t['carried_from']}")
-        st.caption(" · ".join(tags))
-        if not cur_goal:
-            st.caption("⚠️ Kept because you chose it — won't move today's numbers.")
-
-        # ===================== PRIMARY: daily-driver actions =====================
-        # (1) log progress / stop the buzzer
-        urow = st.columns([5, 1])
-        rmk = urow[0].text_input("Task update", key=f"upd_{task_id}",
-                                 placeholder="Quick remark — logs progress & stops the buzzer",
-                                 label_visibility="collapsed")
-        if urow[1].button("Log", key=f"updbtn_{task_id}", use_container_width=True):
-            if rmk.strip():
-                storage.add_task_update(uk, task_id, rmk.strip())
-                st.session_state.pop(f"upd_{task_id}", None)
-                st.toast("Update logged — buzzer silenced for this task.")
-                _rerun("app")
-            else:
-                st.caption("Type a remark first.")
-
-        # (2) steps — tick freely (session only), persist once on Save
+        # ---- collapsed header label ----
+        bits = [("↪ " if carried else "") + t["title"]]
         if steps:
-            live_done = 0
-            for i, s in enumerate(steps):
-                ck = f"step_{task_id}_{i}"
-                if ck not in st.session_state:
-                    st.session_state[ck] = bool(s.get("done"))
-                live_done += 1 if st.session_state[ck] else 0
-            st.caption(f"Steps · {live_done}/{len(steps)} ticked · tick freely, then Save")
-            for i, s in enumerate(steps):
-                st.checkbox(s["text"], key=f"step_{task_id}_{i}")   # no on_change -> no per-tick save
-            dirty = any(bool(st.session_state.get(f"step_{task_id}_{i}")) != bool(steps[i].get("done"))
-                        for i in range(len(steps)))
-            save_lbl = "💾 Save progress" + (" •" if dirty else "")
-            if st.button(save_lbl, key=f"savesteps_{task_id}", use_container_width=True,
-                         disabled=not dirty):
-                new_steps = [{"text": s["text"],
-                              "done": bool(st.session_state.get(f"step_{task_id}_{i}"))}
-                             for i, s in enumerate(steps)]
-                storage.set_task_steps(uk, task_id, new_steps)
-                new_status = storage.sync_task_from_steps(uk, task_id)
-                if new_status == "Done":
-                    for i in range(len(steps)):
-                        st.session_state.pop(f"step_{task_id}_{i}", None)
-                    st.toast("All steps done — task completed.")
+            done_n = sum(1 for s in steps if s.get("done"))
+            bits.append(f"{done_n}/{len(steps)} steps")
+        if cur_goal:
+            bits.append(f"🔗 {cur_goal}")
+        elif t.get("source") != "follow_up":
+            bits.append("⚠️ no goal")
+        if t.get("source") == "follow_up" and t.get("followup_for"):
+            bits.append(f"📞 {t['followup_for']}")
+        label = "  ·  ".join(bits)
+
+        # ---- always-visible gist ----
+        cue = (t.get("coach_cue") or "").strip()
+        if t.get("source") == "follow_up" and t.get("followup_for"):
+            ff = f"Follow up with {t['followup_for']}"
+            gist = f"{ff} — {cue}" if cue else ff
+        else:
+            gist = cue
+        if gist:
+            st.caption(f"💡 {gist[:110]}")
+
+        # ---- session-backed collapse (survives step-tick reruns) ----
+        open_key = f"open_{task_id}"
+        is_open = st.session_state.get(open_key, False)
+        if st.button(("▾ " if is_open else "▸ ") + label, key=f"tgl_{task_id}",
+                     use_container_width=True):
+            st.session_state[open_key] = not is_open
+            _rerun("fragment")
+        if not is_open:
+            return
+
+        with st.container(border=True):
+            tags = ["⚡ Today" if t.get("horizon") != "Build" else "🌱 Build"]
+            tags.append("🔗 " + cur_goal if cur_goal else "⚠️ No goal")
+            if t.get("source") == "follow_up" and t.get("followup_for"):
+                tags.append(f"📞 follow-up · {t['followup_for']}")
+            if carried:
+                tags.append(f"↪ carried from {t['carried_from']}")
+            st.caption(" · ".join(tags))
+            if not cur_goal:
+                st.caption("⚠️ Kept because you chose it — won't move today's numbers.")
+
+            # ===================== PRIMARY: daily-driver actions =====================
+            # (1) log progress / stop the buzzer
+            urow = st.columns([5, 1])
+            rmk = urow[0].text_input("Task update", key=f"upd_{task_id}",
+                                     placeholder="Quick remark — logs progress & stops the buzzer",
+                                     label_visibility="collapsed")
+            if urow[1].button("Log", key=f"updbtn_{task_id}", use_container_width=True):
+                if rmk.strip():
+                    storage.add_task_update(uk, task_id, rmk.strip())
+                    st.session_state.pop(f"upd_{task_id}", None)
+                    st.toast("Update logged — buzzer silenced for this task.")
                     _rerun("app")
                 else:
-                    st.toast("Progress saved.")
-                    _rerun("fragment")
+                    st.caption("Type a remark first.")
 
-        # (3) primary buttons for a task with no steps yet
-        if not steps:
-            b = st.columns(2)
-            if b[0].button("✅ Done", key=f"done_{task_id}", use_container_width=True):
-                storage.update_task(uk, task_id, status="Done"); _rerun("app")
-            if b[1].button("🪜 Break into steps", key=f"steps_{task_id}", use_container_width=True):
-                topic = storage._topic_of(cur_goal, t.get("category", ""))
-                past, matched = storage.find_step_template(uk, topic, t["title"])
-                with st.spinner("Breaking into steps…" + (" (using your past steps)" if past else "")):
-                    s = ai.break_into_steps(t["title"], cur_goal, role_prompt, past_steps=past)
-                    storage.set_task_steps(uk, task_id, s)
-                    storage.log_task_event(uk, task_id, t["title"], "steps_added", cur_goal,
-                                           detail=f"{len(s)} steps" + (f" (from '{matched}')" if past else ""))
-                _rerun("fragment")
-
-        # ===================== SECONDARY: everything else, one place =====================
-        with st.popover("⚙️ Options", use_container_width=True):
-            # goal this serves
-            choices = headings + ["— no goal (just needed) —"]
-            cur_choice = cur_goal if cur_goal in headings else choices[-1]
-            pick = st.selectbox("Goal this serves", choices,
-                                index=choices.index(cur_choice), key=f"goal_{task_id}")
-            picked_goal = "" if pick.startswith("— no goal") else pick
-            if picked_goal != cur_goal:
-                storage.update_task(uk, task_id, day_goal=picked_goal)
-                _rerun("fragment")
-
-            # coaching cue (on demand)
-            cc = st.columns([6, 1])
-            cc[0].markdown(f"💬 _{cue}_" if cue else "💬 _no cue yet_")
-            if cc[1].button("🔄", key=f"cue_{task_id}", help="Get / rethink a coaching tip"):
-                with st.spinner("Thinking…"):
-                    topic = storage._topic_of(cur_goal, t.get("category", ""))
-                    rule = storage.best_rule(uk, topic)
-                    rel = _task_relevant_context(uk, t["title"], cur_goal)
-                    new_cue = ai.companion_cue(t["title"], cur_goal, role_prompt,
-                                               _mis_cue_context(uk, None),
-                                               rule["rule_text"] if rule else "",
-                                               relevant_context=rel)
-                    storage.update_task(uk, task_id, coach_cue=new_cue)
-                _rerun("fragment")
-
-            # move to another day (time-of-day now lives on the rail)
-            import datetime as _dt
-            cur_date = (t.get("plan_date") or TODAY_STR).strip()
-            try:
-                default_d = _dt.datetime.strptime(cur_date, "%Y-%m-%d").date()
-            except Exception:
-                default_d = TODAY
-            new_date = st.date_input("📅 Move to another day", value=default_d, min_value=TODAY,
-                                     key=f"date_{task_id}", format="DD/MM/YYYY")
-            new_date_str = new_date.strftime("%Y-%m-%d")
-            if new_date_str != cur_date:
-                storage.update_task(uk, task_id, plan_date=new_date_str, last_buzz_at="")
-                if new_date_str != TODAY_STR:
-                    st.toast(f"📅 Postponed to {new_date.strftime('%d %b %Y')}")
-                    _rerun("app")     # leaves today -> refresh the list
-                else:
-                    _rerun("fragment")
-
-            # past updates
-            ups = storage.get_task_updates(uk, task_id)
-            if not ups.empty:
-                with st.popover(f"📝 Updates ({len(ups)})"):
-                    for _, up in ups.iterrows():
-                        st.caption(f"**{up['created_at'][11:16]}** — {up['remark']}")
-
-            # collaborators + WhatsApp share
-            directory = storage.get_partners(uk)
-            team = directory[directory["contact_type"] == "team"] if not directory.empty else directory
-            if not team.empty:
-                names = list(team["name"])
-                current = _collab_of(t)
-                picked = st.multiselect("Collaborators", names,
-                                        default=[n for n in current if n in names],
-                                        key=f"collab_{task_id}",
-                                        placeholder="Add teammates (from your Directory)")
-                if set(picked) != set(current):
-                    storage.set_task_collaborators(uk, task_id, picked)
-                if picked:
-                    with st.popover("📲 Share on WhatsApp"):
-                        mk = f"share_{task_id}"
-                        if st.button("Write message", key=f"wmsg_{task_id}"):
-                            st.session_state[mk] = ai.share_plan_message(
-                                t["title"], ", ".join(picked), cur_goal, cue,
-                                storage.get_user(uk).get("name", "I"))
-                        msg = st.session_state.get(mk, "")
-                        msg = st.text_area("Message", value=msg, key=f"wtext_{task_id}", height=90)
-                        for n in picked:
-                            mob = storage.partner_mobile(uk, n)
-                            if mob:
-                                st.link_button(f"Send to {n}", storage.wa_link(mob, msg),
-                                               use_container_width=True)
-                            else:
-                                st.caption(f"{n}: no mobile on file")
-            else:
-                st.caption("Add teammates in Records → Directory (type: team) to collaborate.")
-
-            # edit steps (AI) / write my own
+            # (2) steps — tick freely (session only), persist once on Save
             if steps:
-                with st.popover("✏️ Edit steps with AI"):
-                    instr = st.text_input("How should the steps change?", key=f"si_{task_id}",
-                                          placeholder="e.g. add a prep-call step, split the last one")
-                    if st.button("Rewrite steps", key=f"sr_{task_id}"):
-                        cur_texts = [s["text"] for s in steps]
-                        done_map = {s["text"]: s.get("done") for s in steps}
-                        new_texts = ai.edit_steps(t["title"], cur_texts, instr, cur_goal, role_prompt)
-                        new_steps = [{"text": x, "done": done_map.get(x, False)} for x in new_texts]
-                        storage.set_task_steps(uk, task_id, new_steps)
-                        topic = storage._topic_of(cur_goal, t.get("category", ""))
-                        storage.save_step_template(uk, topic, t["title"], new_texts)
+                live_done = 0
+                for i, s in enumerate(steps):
+                    ck = f"step_{task_id}_{i}"
+                    if ck not in st.session_state:
+                        st.session_state[ck] = bool(s.get("done"))
+                    live_done += 1 if st.session_state[ck] else 0
+                st.caption(f"Steps · {live_done}/{len(steps)} ticked · tick freely, then Save")
+                for i, s in enumerate(steps):
+                    st.checkbox(s["text"], key=f"step_{task_id}_{i}")   # no on_change -> no per-tick save
+                dirty = any(bool(st.session_state.get(f"step_{task_id}_{i}")) != bool(steps[i].get("done"))
+                            for i in range(len(steps)))
+                save_lbl = "💾 Save progress" + (" •" if dirty else "")
+                if st.button(save_lbl, key=f"savesteps_{task_id}", use_container_width=True,
+                             disabled=not dirty):
+                    new_steps = [{"text": s["text"],
+                                  "done": bool(st.session_state.get(f"step_{task_id}_{i}"))}
+                                 for i, s in enumerate(steps)]
+                    storage.set_task_steps(uk, task_id, new_steps)
+                    new_status = storage.sync_task_from_steps(uk, task_id)
+                    if new_status == "Done":
                         for i in range(len(steps)):
                             st.session_state.pop(f"step_{task_id}_{i}", None)
-                        storage.sync_task_from_steps(uk, task_id)
+                        st.toast("All steps done — task completed.")
+                        _rerun("app")
+                    else:
+                        st.toast("Progress saved.")
                         _rerun("fragment")
-            else:
-                with st.popover("✍️ Write my own steps"):
-                    own = st.text_area("One step per line", key=f"own_{task_id}", height=90,
-                                       placeholder="Call the partner\nShow platform demo\nBook next meeting")
-                    if st.button("Set steps", key=f"setown_{task_id}"):
-                        lines = [ln.strip() for ln in own.splitlines() if ln.strip()]
-                        if lines:
-                            storage.set_task_steps(uk, task_id, lines)
-                            topic = storage._topic_of(cur_goal, t.get("category", ""))
-                            storage.save_step_template(uk, topic, t["title"], lines)
-                            storage.log_task_event(uk, task_id, t["title"], "steps_added", cur_goal,
-                                                   detail=f"{len(lines)} own steps")
-                            _rerun("fragment")
 
-            # rename + delete
-            st.divider()
-            nt = st.text_input("Rename task", value=t["title"], key=f"t_{task_id}")
-            rb = st.columns(2)
-            if rb[0].button("💾 Save name", key=f"save_{task_id}", use_container_width=True):
-                if nt.strip():
-                    storage.update_task(uk, task_id, title=nt.strip()); _rerun("fragment")
-            if rb[1].button("🗑 Delete task", key=f"del_{task_id}", use_container_width=True):
-                storage.update_task(uk, task_id, status="Dropped"); _rerun("app")
+            # (3) primary buttons for a task with no steps yet
+            if not steps:
+                b = st.columns(2)
+                if b[0].button("✅ Done", key=f"done_{task_id}", use_container_width=True):
+                    storage.update_task(uk, task_id, status="Done"); _rerun("app")
+                if b[1].button("🪜 Break into steps", key=f"steps_{task_id}", use_container_width=True):
+                    topic = storage._topic_of(cur_goal, t.get("category", ""))
+                    past, matched = storage.find_step_template(uk, topic, t["title"])
+                    with st.spinner("Breaking into steps…" + (" (using your past steps)" if past else "")):
+                        s = ai.break_into_steps(t["title"], cur_goal, role_prompt, past_steps=past)
+                        storage.set_task_steps(uk, task_id, s)
+                        storage.log_task_event(uk, task_id, t["title"], "steps_added", cur_goal,
+                                               detail=f"{len(s)} steps" + (f" (from '{matched}')" if past else ""))
+                    _rerun("fragment")
+
+            # ===================== SECONDARY: everything else, one place =====================
+            with st.popover("⚙️ Options", use_container_width=True):
+                # goal this serves
+                choices = headings + ["— no goal (just needed) —"]
+                cur_choice = cur_goal if cur_goal in headings else choices[-1]
+                pick = st.selectbox("Goal this serves", choices,
+                                    index=choices.index(cur_choice), key=f"goal_{task_id}")
+                picked_goal = "" if pick.startswith("— no goal") else pick
+                if picked_goal != cur_goal:
+                    storage.update_task(uk, task_id, day_goal=picked_goal)
+                    _rerun("fragment")
+
+                # coaching cue (on demand)
+                cc = st.columns([6, 1])
+                cc[0].markdown(f"💬 _{cue}_" if cue else "💬 _no cue yet_")
+                if cc[1].button("🔄", key=f"cue_{task_id}", help="Get / rethink a coaching tip"):
+                    with st.spinner("Thinking…"):
+                        topic = storage._topic_of(cur_goal, t.get("category", ""))
+                        rule = storage.best_rule(uk, topic)
+                        rel = _task_relevant_context(uk, t["title"], cur_goal)
+                        new_cue = ai.companion_cue(t["title"], cur_goal, role_prompt,
+                                                   _mis_cue_context(uk, None),
+                                                   rule["rule_text"] if rule else "",
+                                                   relevant_context=rel)
+                        storage.update_task(uk, task_id, coach_cue=new_cue)
+                    _rerun("fragment")
+
+                # move to another day (time-of-day now lives on the rail)
+                import datetime as _dt
+                cur_date = (t.get("plan_date") or TODAY_STR).strip()
+                try:
+                    default_d = _dt.datetime.strptime(cur_date, "%Y-%m-%d").date()
+                except Exception:
+                    default_d = TODAY
+                new_date = st.date_input("📅 Move to another day", value=default_d, min_value=TODAY,
+                                         key=f"date_{task_id}", format="DD/MM/YYYY")
+                new_date_str = new_date.strftime("%Y-%m-%d")
+                if new_date_str != cur_date:
+                    storage.update_task(uk, task_id, plan_date=new_date_str, last_buzz_at="")
+                    if new_date_str != TODAY_STR:
+                        st.toast(f"📅 Postponed to {new_date.strftime('%d %b %Y')}")
+                        _rerun("app")     # leaves today -> refresh the list
+                    else:
+                        _rerun("fragment")
+
+                # past updates
+                ups = storage.get_task_updates(uk, task_id)
+                if not ups.empty:
+                    with st.popover(f"📝 Updates ({len(ups)})"):
+                        for _, up in ups.iterrows():
+                            st.caption(f"**{up['created_at'][11:16]}** — {up['remark']}")
+
+                # collaborators + WhatsApp share
+                directory = storage.get_partners(uk)
+                team = directory[directory["contact_type"] == "team"] if not directory.empty else directory
+                if not team.empty:
+                    names = list(team["name"])
+                    current = _collab_of(t)
+                    picked = st.multiselect("Collaborators", names,
+                                            default=[n for n in current if n in names],
+                                            key=f"collab_{task_id}",
+                                            placeholder="Add teammates (from your Directory)")
+                    if set(picked) != set(current):
+                        storage.set_task_collaborators(uk, task_id, picked)
+                    if picked:
+                        with st.popover("📲 Share on WhatsApp"):
+                            mk = f"share_{task_id}"
+                            if st.button("Write message", key=f"wmsg_{task_id}"):
+                                st.session_state[mk] = ai.share_plan_message(
+                                    t["title"], ", ".join(picked), cur_goal, cue,
+                                    storage.get_user(uk).get("name", "I"))
+                            msg = st.session_state.get(mk, "")
+                            msg = st.text_area("Message", value=msg, key=f"wtext_{task_id}", height=90)
+                            for n in picked:
+                                mob = storage.partner_mobile(uk, n)
+                                if mob:
+                                    st.link_button(f"Send to {n}", storage.wa_link(mob, msg),
+                                                   use_container_width=True)
+                                else:
+                                    st.caption(f"{n}: no mobile on file")
+                else:
+                    st.caption("Add teammates in Records → Directory (type: team) to collaborate.")
+
+                # edit steps (AI) / write my own
+                if steps:
+                    with st.popover("✏️ Edit steps with AI"):
+                        instr = st.text_input("How should the steps change?", key=f"si_{task_id}",
+                                              placeholder="e.g. add a prep-call step, split the last one")
+                        if st.button("Rewrite steps", key=f"sr_{task_id}"):
+                            cur_texts = [s["text"] for s in steps]
+                            done_map = {s["text"]: s.get("done") for s in steps}
+                            new_texts = ai.edit_steps(t["title"], cur_texts, instr, cur_goal, role_prompt)
+                            new_steps = [{"text": x, "done": done_map.get(x, False)} for x in new_texts]
+                            storage.set_task_steps(uk, task_id, new_steps)
+                            topic = storage._topic_of(cur_goal, t.get("category", ""))
+                            storage.save_step_template(uk, topic, t["title"], new_texts)
+                            for i in range(len(steps)):
+                                st.session_state.pop(f"step_{task_id}_{i}", None)
+                            storage.sync_task_from_steps(uk, task_id)
+                            _rerun("fragment")
+                else:
+                    with st.popover("✍️ Write my own steps"):
+                        own = st.text_area("One step per line", key=f"own_{task_id}", height=90,
+                                           placeholder="Call the partner\nShow platform demo\nBook next meeting")
+                        if st.button("Set steps", key=f"setown_{task_id}"):
+                            lines = [ln.strip() for ln in own.splitlines() if ln.strip()]
+                            if lines:
+                                storage.set_task_steps(uk, task_id, lines)
+                                topic = storage._topic_of(cur_goal, t.get("category", ""))
+                                storage.save_step_template(uk, topic, t["title"], lines)
+                                storage.log_task_event(uk, task_id, t["title"], "steps_added", cur_goal,
+                                                       detail=f"{len(lines)} own steps")
+                                _rerun("fragment")
+
+                # rename + delete
+                st.divider()
+                nt = st.text_input("Rename task", value=t["title"], key=f"t_{task_id}")
+                rb = st.columns(2)
+                if rb[0].button("💾 Save name", key=f"save_{task_id}", use_container_width=True):
+                    if nt.strip():
+                        storage.update_task(uk, task_id, title=nt.strip()); _rerun("fragment")
+                if rb[1].button("🗑 Delete task", key=f"del_{task_id}", use_container_width=True):
+                    storage.update_task(uk, task_id, status="Dropped"); _rerun("app")
 
 
 def _buzzer(uk, user):
