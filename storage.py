@@ -545,6 +545,16 @@ def get_tasks(user_key, plan_date=None):
     return df
 
 
+def get_task(user_key, task_id):
+    """One task row (Series) or None. Reads through the same ~45s cache as get_tasks,
+    so a task card can refresh just itself after an edit without a fresh DB round trip."""
+    df = _read(_tasks_path(user_key), schemas.TASKS)
+    if df.empty:
+        return None
+    m = df[df["task_id"].astype(str) == str(task_id)]
+    return m.iloc[0] if not m.empty else None
+
+
 def _norm_title(s):
     return " ".join(str(s or "").lower().split())
 
