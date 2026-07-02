@@ -128,6 +128,28 @@ def table_columns(table):
     return cols
 
 
+# Cache of each table's primary-key columns (used to dedupe a write batch so two rows
+# sharing a PK can't trip a UniqueViolation on INSERT). Filled on first use per table.
+_pk_cache = {}
+
+
+def table_pk(table):
+    """Primary-key column names of a table (cached). [] if the table has no PK."""
+    if table in _pk_cache:
+        return _pk_cache[table]
+    with _get_pool().connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT a.attname FROM pg_index i "
+                "JOIN pg_attribute a ON a.attrelid = i.indrelid "
+                "AND a.attnum = ANY(i.indkey) "
+                "WHERE i.indrelid = %s::regclass AND i.indisprimary",
+                (f'"{table}"',))
+            pk = [r[0] for r in cur.fetchall()]
+    _pk_cache[table] = pk
+    return pk
+
+
 # ----------------------------------------------------------------- read / write
 
 def read_table(tab, user_key, columns):
@@ -171,6 +193,15 @@ def write_table(tab, user_key, df, columns):
             out[c] = ""
     if not out.empty:
         out = out.astype(object).where(pd.notnull(out), "")
+
+    # Drop duplicate primary-key rows before INSERT. The DELETE below clears whatever
+    # is already in the DB, so a UniqueViolation here can only come from two rows
+    # inside `out` sharing a PK (e.g. two day_goals on the same slot). keep="last"
+    # means the most recent edit wins.
+    if not out.empty:
+        pk = [c for c in table_pk(table) if c in out.columns]
+        if pk:
+            out = out.drop_duplicates(subset=pk, keep="last")
 
     placeholders = ", ".join(["%s"] * len(write_cols))
     collist = ", ".join(f'"{c}"' for c in write_cols)
