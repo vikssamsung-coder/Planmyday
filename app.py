@@ -682,8 +682,15 @@ def plan_and_tasks(user, cards):
         if _oh[1].button("⛶ Full screen", key="open_quadrants", use_container_width=True):
             st.session_state["tasks_expanded"] = True
             st.rerun()
-        for _, t in open_t.iterrows():
-            _task_card(uk, t["task_id"], headings, role_prompt)
+        _inject_rail_css()
+        st.caption("Numbered down the rail by time — set a ⏰ on the rail to order your day.")
+        open_sorted = _sort_open_by_time(open_t)
+        for _n, (_, t) in enumerate(open_sorted.iterrows(), start=1):
+            rc = st.columns([1, 7], gap="small")
+            with rc[0]:
+                _task_rail(uk, t, _n, first=(_n == 1))
+            with rc[1]:
+                _task_card(uk, t["task_id"], headings, role_prompt)
 
         if not done_t.empty:
             with st.expander(f"Done · {len(done_t)}"):
@@ -936,13 +943,6 @@ def _mis_cue_context(uk, cards):
     return _mis_context(cards)
 
 
-def _step_changed(uk, task_id, i, key):
-    """Checkbox on_change: write this step's value, then sync task status —
-    task auto-completes ONLY when every step is checked, never on one step."""
-    storage.set_step_done(uk, task_id, i, st.session_state.get(key, False))
-    storage.sync_task_from_steps(uk, task_id)
-
-
 def _steps_of(t):
     """Parse a task row's steps_json (already in the row — no extra DB read)."""
     import json as _j
@@ -963,25 +963,87 @@ def _collab_of(t):
         return []
 
 
+def _has_time(v):
+    v = str(v or "").strip()
+    return len(v) == 5 and v[2] == ":"
+
+
+def _sort_open_by_time(df):
+    """Open tasks ordered for planning: timed tasks chronologically, untimed last
+    (stable, so untimed keep their existing order)."""
+    if df is None or df.empty:
+        return df
+    d = df.copy()
+    d["_tk"] = d["due_time"].map(lambda v: str(v).strip() if _has_time(v) else "99:99")
+    d = d.sort_values("_tk", kind="stable").drop(columns=["_tk"])
+    return d
+
+
+def _inject_rail_css():
+    st.markdown("""<style>
+    .pmd-rail{display:flex;flex-direction:column;align-items:center;gap:3px;padding-top:6px}
+    .pmd-rail-node{width:26px;height:26px;border-radius:50%;background:#2D4A5E;color:#fff;
+      display:flex;align-items:center;justify-content:center;font-weight:600;font-size:.85rem;
+      border:2px solid #22394A;position:relative;z-index:1}
+    .pmd-rail-node::before{content:"";position:absolute;left:50%;top:-40px;transform:translateX(-50%);
+      width:2px;height:40px;background:#E7E3DC;z-index:0}
+    .pmd-rail-first .pmd-rail-node::before{display:none}
+    .pmd-rail-time{font-size:.72rem;color:#2D4A5E;font-weight:600}
+    .pmd-rail-time.none{color:#9AA6B2;font-weight:500}
+    </style>""", unsafe_allow_html=True)
+
+
+def _task_rail(uk, t, idx, first=False):
+    """The numbered time-rail node to the LEFT of a task card: order number + scheduled
+    time, with a quick ⏰ setter so the day can be planned by time (list re-sorts on change).
+    Rendered by the PARENT (not the card fragment), so setting a time reruns the whole list
+    and re-orders it chronologically."""
+    tid = t["task_id"]
+    due = (t.get("due_time") or "").strip()
+    timed = _has_time(due)
+    node_cls = "pmd-rail pmd-rail-first" if first else "pmd-rail"
+    time_html = (f"<div class='pmd-rail-time'>{due}</div>" if timed
+                 else "<div class='pmd-rail-time none'>—</div>")
+    st.markdown(f"<div class='{node_cls}'><div class='pmd-rail-node'>{idx}</div>{time_html}</div>",
+                unsafe_allow_html=True)
+    with st.popover("⏰", use_container_width=True):
+        st.caption("Set a time to place this on the day & get a reminder")
+        hours = ["—"] + [f"{h:02d}" for h in range(24)]
+        base_min = list(range(0, 60, 5))
+        cur_h, cur_m = "", ""
+        if timed:
+            cur_h, cur_m = due[:2], due[3:5]
+        if cur_m.isdigit() and int(cur_m) not in base_min:
+            base_min = sorted(set(base_min) | {int(cur_m)})
+        mins = [f"{m:02d}" for m in base_min]
+        rc = st.columns(2)
+        hh = rc[0].selectbox("Hr", hours, index=hours.index(cur_h) if cur_h in hours else 0,
+                             key=f"rh_{tid}")
+        mm = rc[1].selectbox("Min", mins, index=mins.index(cur_m) if cur_m in mins else 0,
+                             key=f"rm_{tid}")
+        new_time = "" if hh == "—" else f"{hh}:{mm}"
+        if new_time != due:
+            storage.update_task(uk, tid, due_time=new_time, last_buzz_at="")
+            st.rerun()   # parent scope -> the open list re-sorts by the new time
+
+
 @_fragment
 def _task_card(uk, task_id, headings, role_prompt=""):
     """One open/carried task as a COLLAPSIBLE fragment card.
 
-    The card re-reads its own task (cache-backed), so an in-card edit reruns ONLY this
-    card (scope='fragment') instead of the whole app. Set-changing actions — Done, Delete,
-    or a last-step tick that auto-completes the task — promote to a full app rerun so the
-    Open list and the buzzer refresh.
+    The card re-reads its own task (cache-backed) and reruns in ISOLATION (scope='fragment')
+    for in-card edits; set-changing actions (Done, Delete, save-completes-the-task, moved to
+    another day) promote to a full app rerun so the Open list and buzzer refresh.
 
-    Layout is deliberately slim: the daily-driver actions (log an update, tick steps, mark
-    Done / break into steps) are up top; all configuration lives behind one ⚙️ Options
-    popover so the card reads like a task, not a control panel.
+    Open/closed state is held in session (NOT st.expander) so ticking a step doesn't collapse
+    the card. Step ticks are held in session and persisted only when 'Save progress' is pressed
+    — no write and no completion happen on each individual tick.
     """
     t = storage.get_task(uk, task_id)
     if t is None:
         return
     status = str(t.get("status", "") or "").strip()
     if status in ("Done", "Dropped"):
-        # became terminal (e.g. the last step was just ticked) -> let the parent drop it
         _rerun("app")
         return
 
@@ -989,7 +1051,7 @@ def _task_card(uk, task_id, headings, role_prompt=""):
     steps = _steps_of(t)
     cur_goal = t.get("day_goal", "") or ""
 
-    # ---- expander label (informative while collapsed) ----
+    # ---- collapsed header label ----
     bits = [("↪ " if carried else "") + t["title"]]
     if steps:
         done_n = sum(1 for s in steps if s.get("done"))
@@ -1002,7 +1064,7 @@ def _task_card(uk, task_id, headings, role_prompt=""):
         bits.append(f"📞 {t['followup_for']}")
     label = "  ·  ".join(bits)
 
-    # ---- always-visible gist (the coaching cue / follow-up line) ----
+    # ---- always-visible gist ----
     cue = (t.get("coach_cue") or "").strip()
     if t.get("source") == "follow_up" and t.get("followup_for"):
         ff = f"Follow up with {t['followup_for']}"
@@ -1012,7 +1074,17 @@ def _task_card(uk, task_id, headings, role_prompt=""):
     if gist:
         st.caption(f"💡 {gist[:110]}")
 
-    with st.expander(label, expanded=False):
+    # ---- session-backed collapse (survives step-tick reruns) ----
+    open_key = f"open_{task_id}"
+    is_open = st.session_state.get(open_key, False)
+    if st.button(("▾ " if is_open else "▸ ") + label, key=f"tgl_{task_id}",
+                 use_container_width=True):
+        st.session_state[open_key] = not is_open
+        _rerun("fragment")
+    if not is_open:
+        return
+
+    with st.container(border=True):
         tags = ["⚡ Today" if t.get("horizon") != "Build" else "🌱 Build"]
         tags.append("🔗 " + cur_goal if cur_goal else "⚠️ No goal")
         if t.get("source") == "follow_up" and t.get("followup_for"):
@@ -1034,23 +1106,41 @@ def _task_card(uk, task_id, headings, role_prompt=""):
                 storage.add_task_update(uk, task_id, rmk.strip())
                 st.session_state.pop(f"upd_{task_id}", None)
                 st.toast("Update logged — buzzer silenced for this task.")
-                _rerun("app")          # full rerun so the buzzer clears immediately
+                _rerun("app")
             else:
                 st.caption("Type a remark first.")
 
-        # (2) steps — ticking is the primary action for a stepped task
+        # (2) steps — tick freely (session only), persist once on Save
         if steps:
-            done_n = sum(1 for s in steps if s.get("done"))
-            st.caption(f"Steps · {done_n}/{len(steps)} done"
-                       + (" · tick all to complete" if done_n < len(steps) else " · ✓ all done"))
+            live_done = 0
             for i, s in enumerate(steps):
                 ck = f"step_{task_id}_{i}"
                 if ck not in st.session_state:
                     st.session_state[ck] = bool(s.get("done"))
-                st.checkbox(s["text"], key=ck,
-                            on_change=_step_changed, args=(uk, task_id, i, ck))
+                live_done += 1 if st.session_state[ck] else 0
+            st.caption(f"Steps · {live_done}/{len(steps)} ticked · tick freely, then Save")
+            for i, s in enumerate(steps):
+                st.checkbox(s["text"], key=f"step_{task_id}_{i}")   # no on_change -> no per-tick save
+            dirty = any(bool(st.session_state.get(f"step_{task_id}_{i}")) != bool(steps[i].get("done"))
+                        for i in range(len(steps)))
+            save_lbl = "💾 Save progress" + (" •" if dirty else "")
+            if st.button(save_lbl, key=f"savesteps_{task_id}", use_container_width=True,
+                         disabled=not dirty):
+                new_steps = [{"text": s["text"],
+                              "done": bool(st.session_state.get(f"step_{task_id}_{i}"))}
+                             for i, s in enumerate(steps)]
+                storage.set_task_steps(uk, task_id, new_steps)
+                new_status = storage.sync_task_from_steps(uk, task_id)
+                if new_status == "Done":
+                    for i in range(len(steps)):
+                        st.session_state.pop(f"step_{task_id}_{i}", None)
+                    st.toast("All steps done — task completed.")
+                    _rerun("app")
+                else:
+                    st.toast("Progress saved.")
+                    _rerun("fragment")
 
-        # (3) primary buttons
+        # (3) primary buttons for a task with no steps yet
         if not steps:
             b = st.columns(2)
             if b[0].button("✅ Done", key=f"done_{task_id}", use_container_width=True):
@@ -1077,7 +1167,7 @@ def _task_card(uk, task_id, headings, role_prompt=""):
                 storage.update_task(uk, task_id, day_goal=picked_goal)
                 _rerun("fragment")
 
-            # coaching cue (generated on demand — not on task creation)
+            # coaching cue (on demand)
             cc = st.columns([6, 1])
             cc[0].markdown(f"💬 _{cue}_" if cue else "💬 _no cue yet_")
             if cc[1].button("🔄", key=f"cue_{task_id}", help="Get / rethink a coaching tip"):
@@ -1092,39 +1182,25 @@ def _task_card(uk, task_id, headings, role_prompt=""):
                     storage.update_task(uk, task_id, coach_cue=new_cue)
                 _rerun("fragment")
 
-            # reschedule + exact reminder time
+            # move to another day (time-of-day now lives on the rail)
             import datetime as _dt
             cur_date = (t.get("plan_date") or TODAY_STR).strip()
             try:
                 default_d = _dt.datetime.strptime(cur_date, "%Y-%m-%d").date()
             except Exception:
                 default_d = TODAY
-            cur_time = (t.get("due_time") or "").strip()
-            dc = st.columns([3, 2, 2])
-            new_date = dc[0].date_input("📅 Date", value=default_d, min_value=TODAY,
-                                        key=f"date_{task_id}", format="DD/MM/YYYY")
+            new_date = st.date_input("📅 Move to another day", value=default_d, min_value=TODAY,
+                                     key=f"date_{task_id}", format="DD/MM/YYYY")
             new_date_str = new_date.strftime("%Y-%m-%d")
-            hours = ["—"] + [f"{h:02d}" for h in range(24)]
-            base_min = list(range(0, 60, 5))
-            cur_h, cur_m = "", ""
-            if len(cur_time) == 5 and cur_time[2] == ":":
-                cur_h, cur_m = cur_time[:2], cur_time[3:5]
-            if cur_m.isdigit() and int(cur_m) not in base_min:
-                base_min = sorted(set(base_min) | {int(cur_m)})
-            mins = [f"{m:02d}" for m in base_min]
-            h_idx = hours.index(cur_h) if cur_h in hours else 0
-            m_idx = mins.index(cur_m) if cur_m in mins else 0
-            hh = dc[1].selectbox("⏰ Hr", hours, index=h_idx, key=f"hh_{task_id}")
-            mm = dc[2].selectbox("Min", mins, index=m_idx, key=f"mm_{task_id}")
-            new_time = "" if hh == "—" else f"{hh}:{mm}"
-            if new_date_str != cur_date or new_time != cur_time:
-                storage.update_task(uk, task_id, plan_date=new_date_str,
-                                    due_time=new_time, last_buzz_at="")
-                if new_date_str != cur_date and new_date_str != TODAY_STR:
+            if new_date_str != cur_date:
+                storage.update_task(uk, task_id, plan_date=new_date_str, last_buzz_at="")
+                if new_date_str != TODAY_STR:
                     st.toast(f"📅 Postponed to {new_date.strftime('%d %b %Y')}")
-                _rerun("fragment")
+                    _rerun("app")     # leaves today -> refresh the list
+                else:
+                    _rerun("fragment")
 
-            # past updates (read-only log)
+            # past updates
             ups = storage.get_task_updates(uk, task_id)
             if not ups.empty:
                 with st.popover(f"📝 Updates ({len(ups)})"):
@@ -1204,7 +1280,6 @@ def _task_card(uk, task_id, headings, role_prompt=""):
                 storage.update_task(uk, task_id, status="Dropped"); _rerun("app")
 
 
-@_fragment
 def _buzzer(uk, user):
     """Auto-refreshing reminder. Finds due tasks (act-to-stop) and pops a banner + plays
     an alarm, re-nagging every 5 min until the user posts a Task update. Runs on EVERY page
