@@ -683,10 +683,7 @@ def plan_and_tasks(user, cards):
             st.session_state["tasks_expanded"] = True
             st.rerun()
         _inject_rail_css()
-        hdr2 = st.columns([5, 2])
-        hdr2[0].caption("Numbered by time · set a ⏰ on the rail — changing a time updates only that card.")
-        if hdr2[1].button("↕ Sort by time", key="sort_by_time", use_container_width=True):
-            st.rerun()
+        st.caption("Numbered by time — set a ⏰ on the rail and press Update; the list re-orders automatically.")
         open_sorted = _sort_open_by_time(open_t)
         for _n, (_, t) in enumerate(open_sorted.iterrows(), start=1):
             _task_card(uk, t["task_id"], headings, role_prompt, seq=_n, first=(_n == 1))
@@ -980,33 +977,28 @@ def _sort_open_by_time(df):
 
 def _inject_rail_css():
     st.markdown("""<style>
-    .pmd-rail{display:flex;flex-direction:column;align-items:center;gap:3px;padding-top:6px}
-    .pmd-rail-node{width:26px;height:26px;border-radius:50%;background:#2D4A5E;color:#fff;
-      display:flex;align-items:center;justify-content:center;font-weight:600;font-size:.85rem;
-      border:2px solid #22394A;position:relative;z-index:1}
-    .pmd-rail-node::before{content:"";position:absolute;left:50%;top:-40px;transform:translateX(-50%);
-      width:2px;height:40px;background:#E7E3DC;z-index:0}
-    .pmd-rail-first .pmd-rail-node::before{display:none}
-    .pmd-rail-time{font-size:.72rem;color:#2D4A5E;font-weight:600}
+    .pmd-rail{display:flex;flex-direction:column;align-items:center;gap:2px;padding-top:4px}
+    .pmd-rail-node{width:28px;height:28px;border-radius:50%;background:#2D4A5E;color:#fff;
+      display:flex;align-items:center;justify-content:center;font-weight:600;font-size:.9rem;
+      border:2px solid #22394A}
+    .pmd-rail-time{font-size:.72rem;color:#2D4A5E;font-weight:600;line-height:1.1}
     .pmd-rail-time.none{color:#9AA6B2;font-weight:500}
     </style>""", unsafe_allow_html=True)
 
 
 def _task_rail(uk, t, idx, first=False):
-    """The numbered time-rail node to the LEFT of a task card: order number + scheduled
-    time, with a quick ⏰ setter so the day can be planned by time (list re-sorts on change).
-    Rendered INSIDE the card fragment, so setting a time reruns only this one card — the list
-    order is left as-is until the user presses "Sort by time"."""
+    """Numbered time-rail node to the LEFT of a task card: order number + scheduled time,
+    plus a ⏰ setter. Selecting Hr/Min does nothing on its own; the Update button writes the
+    time AND triggers a full rerun so the whole list re-sorts by time (no separate button)."""
     tid = t["task_id"]
     due = (t.get("due_time") or "").strip()
     timed = _has_time(due)
-    node_cls = "pmd-rail pmd-rail-first" if first else "pmd-rail"
     time_html = (f"<div class='pmd-rail-time'>{due}</div>" if timed
                  else "<div class='pmd-rail-time none'>—</div>")
-    st.markdown(f"<div class='{node_cls}'><div class='pmd-rail-node'>{idx}</div>{time_html}</div>",
+    st.markdown(f"<div class='pmd-rail'><div class='pmd-rail-node'>{idx}</div>{time_html}</div>",
                 unsafe_allow_html=True)
     with st.popover("⏰", use_container_width=True):
-        st.caption("Set a time to place this on the day & get a reminder")
+        st.caption("Pick a time, then Update — the list re-orders by time.")
         hours = ["—"] + [f"{h:02d}" for h in range(24)]
         base_min = list(range(0, 60, 5))
         cur_h, cur_m = "", ""
@@ -1021,9 +1013,9 @@ def _task_rail(uk, t, idx, first=False):
         mm = rc[1].selectbox("Min", mins, index=mins.index(cur_m) if cur_m in mins else 0,
                              key=f"rm_{tid}")
         new_time = "" if hh == "—" else f"{hh}:{mm}"
-        if new_time != due:
+        if st.button("Update", key=f"rtset_{tid}", type="primary", use_container_width=True):
             storage.update_task(uk, tid, due_time=new_time, last_buzz_at="")
-            _rerun("fragment")   # refresh ONLY this card; press "Sort by time" to re-order the list
+            st.rerun()   # full rerun -> the open list auto-sorts by the new time
 
 
 @_fragment
@@ -1068,15 +1060,13 @@ def _task_card(uk, task_id, headings, role_prompt="", seq=None, first=False):
             bits.append(f"📞 {t['followup_for']}")
         label = "  ·  ".join(bits)
 
-        # ---- always-visible gist ----
+        # ---- coaching gist (rendered UNDER the header so the card lines up with the rail #) ----
         cue = (t.get("coach_cue") or "").strip()
         if t.get("source") == "follow_up" and t.get("followup_for"):
             ff = f"Follow up with {t['followup_for']}"
             gist = f"{ff} — {cue}" if cue else ff
         else:
             gist = cue
-        if gist:
-            st.caption(f"💡 {gist[:110]}")
 
         # ---- session-backed collapse (survives step-tick reruns) ----
         open_key = f"open_{task_id}"
@@ -1085,6 +1075,8 @@ def _task_card(uk, task_id, headings, role_prompt="", seq=None, first=False):
                      use_container_width=True):
             st.session_state[open_key] = not is_open
             _rerun("fragment")
+        if gist and not is_open:
+            st.caption(f"💡 {gist[:110]}")
         if not is_open:
             return
 
@@ -1339,15 +1331,31 @@ def _buzzer(uk, user):
     </div>
     """, unsafe_allow_html=True)
 
-    # Alarm sound. Browsers (and Streamlit Cloud's iframe) block UNMUTED autoplay until the
-    # user has interacted with the page, so the flashing banner above is the reliable cue and
-    # the sound is best-effort. st.audio with autoplay+loop is the most reliable sound path.
+    # Alarm — show the buzzer VIDEO (muted, so browsers allow autoplay) AND play its sound
+    # via st.audio. The previous code used st.audio ALONE on a video file, which plays only the
+    # file's audio track and never renders the picture — that's exactly why you heard beeps but
+    # saw no video. A MUTED video autoplays reliably in every browser and inside the Streamlit
+    # Cloud iframe; the sound is best-effort (browsers permit unmuted autoplay once the user has
+    # interacted with the page, which they have by the time a reminder fires).
     import os as _os
     snd = _os.path.join(_os.path.dirname(__file__), "assets", "buzzer.mp4")
     if not _os.path.exists(snd):
         import paths
         snd = _os.path.join(paths.base_dir(), "_common", "buzzer.mp4")
     if _os.path.exists(snd):
+        # 1) the PICTURE — muted video autoplays everywhere (fall back through param sets for
+        #    older Streamlit that lacks muted/loop/autoplay).
+        _shown = False
+        for _kw in ({"autoplay": True, "loop": True, "muted": True},
+                    {"autoplay": True, "loop": True},
+                    {"autoplay": True}):
+            try:
+                st.video(snd, **_kw); _shown = True; break
+            except TypeError:
+                continue
+        if not _shown:
+            st.video(snd)
+        # 2) the SOUND — best-effort unmuted autoplay of the same clip
         try:
             st.audio(snd, autoplay=True, loop=True)
         except TypeError:
@@ -2275,6 +2283,21 @@ def effort_view(user):
                 'cell shade = number of tasks · '
                 '<span style="color:#2E9E6B;">● widest effort spread</span></div>',
                 unsafe_allow_html=True)
+
+    # ---- downloadable, designed PDF of this matrix ----
+    try:
+        import effort_pdf
+        meta = {"name": user.get("name", uk), "role": user.get("role", ""),
+                "date_from": fs, "date_to": ts}
+        pdf_bytes = effort_pdf.build_effort_pdf(
+            meta, rows, cols, counts, row_tot, col_tot, grand,
+            learning_kra=classify.LEARNING_KRA, unassigned_kra=classify.UNASSIGNED)
+        st.download_button("⬇️ Download effort report (PDF)", data=pdf_bytes,
+                           file_name=f"EffortReport_{uk}_{fs}_to_{ts}.pdf",
+                           mime="application/pdf", use_container_width=True,
+                           key="effort_pdf_dl")
+    except Exception as e:
+        st.caption(f"PDF export unavailable ({_safe_err(e)}) — add `reportlab` to requirements.txt.")
 
     # ---- edit the KRA columns (all editable) ----
     with st.expander("⚙️ Edit KRA columns"):
