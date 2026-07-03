@@ -31,6 +31,7 @@ import ai
 import retrieval
 import classify
 import report
+import project_planner
 import workspace as ws
 import style
 import dsr
@@ -2984,11 +2985,11 @@ def header_nav(is_lead, partner_ok=True, is_admin=False):
         tabs.append("Records")
         if partner_ok:
             tabs.append("Communicate")
-        tabs += ["Updates", "Monthly", "Effort", "Learning", "History", "Settings"]
+        tabs += ["Updates", "Monthly", "Effort", "Projects", "Learning", "History", "Settings"]
         icon_map = {"Today": "columns-gap", "Daily log": "notebook", "Records": "address-book",
                     "Communicate": "send", "Updates": "megaphone", "Monthly": "compass",
-                    "Effort": "grid-3x3-gap-fill", "Learning": "lightbulb", "History": "history",
-                    "Settings": "gear"}
+                    "Effort": "grid-3x3-gap-fill", "Projects": "kanban", "Learning": "lightbulb",
+                    "History": "history", "Settings": "gear"}
     icons = [icon_map[t] for t in tabs]
     if HAVE_OPTION_MENU:
         return option_menu(
@@ -3422,7 +3423,8 @@ def main():
 
     {"Today": today_view, "Daily log": daily_log_view, "Records": records_view,
      "Communicate": communicate_view, "Updates": updates_view, "Monthly": monthly_view,
-     "Effort": effort_view, "Learning": learning_view, "History": history_view,
+     "Effort": effort_view, "Projects": project_planner.project_view,
+     "Learning": learning_view, "History": history_view,
      "Settings": settings_view, "Admin": admin_view}.get(choice, today_view)(user)
 
 

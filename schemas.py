@@ -204,3 +204,11 @@ POPUP_COUNTS = ["date", "user_key", "count"]
 # as the always-on personalisation so old preferences are never lost to a recency cap.
 # source_count = how many accepted learnings the brief was built from (drives regeneration).
 LEARNINGS_DIGEST = ["user_key", "brief", "source_count", "updated_at"]
+
+# Project Planner — main task + sub-task rows (per-user). Days-left & health are COMPUTED
+# from end_date/status/percent at render time, so they are not stored.
+PROJECT_TASKS = [
+    "row_id", "user_key", "project", "subtask", "owner", "priority", "status",
+    "start_date", "end_date", "percent", "notes", "sort_order",
+    "created_at", "updated_at",
+]

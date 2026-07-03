@@ -466,6 +466,61 @@ def save_effort_kras(user_key, names):
     _write(_effort_kras_path(user_key), df, schemas.EFFORT_KRAS)
 
 
+# ---------------------------------------------------------------- Project Planner
+def _project_tasks_path(user_key):
+    return os.path.join(_user_dir(user_key), "project_tasks.xlsx")
+
+
+def get_project_tasks(user_key):
+    """All project/sub-task rows for this user (days-left & health are computed at render)."""
+    return _read(_project_tasks_path(user_key), schemas.PROJECT_TASKS)
+
+
+def save_project_tasks(user_key, df):
+    """Bulk-replace this user's project rows from a DataFrame (e.g. the plan editor)."""
+    out = df.copy()
+    for c in schemas.PROJECT_TASKS:
+        if c not in out.columns:
+            out[c] = ""
+    out["user_key"] = user_key
+    _write(_project_tasks_path(user_key), out[schemas.PROJECT_TASKS], schemas.PROJECT_TASKS)
+
+
+def add_project_task(user_key, row):
+    """Append one project/sub-task row; returns its row_id."""
+    import uuid as _uuid
+    row = dict(row)
+    row.setdefault("row_id", "pt_" + _uuid.uuid4().hex[:10])
+    row["user_key"] = user_key
+    row.setdefault("created_at", _now())
+    row["updated_at"] = _now()
+    df = get_project_tasks(user_key)
+    new = pd.DataFrame([{c: str(row.get(c, "")) for c in schemas.PROJECT_TASKS}])
+    df = new if df.empty else pd.concat([df, new], ignore_index=True)
+    _write(_project_tasks_path(user_key), df, schemas.PROJECT_TASKS)
+    return row["row_id"]
+
+
+def update_project_task(user_key, row_id, **fields):
+    df = get_project_tasks(user_key)
+    if df.empty:
+        return
+    m = df["row_id"].astype(str) == str(row_id)
+    for k, v in fields.items():
+        if k in df.columns:
+            df.loc[m, k] = str(v)
+    df.loc[m, "updated_at"] = _now()
+    _write(_project_tasks_path(user_key), df, schemas.PROJECT_TASKS)
+
+
+def delete_project_task(user_key, row_id):
+    df = get_project_tasks(user_key)
+    if df.empty:
+        return
+    df = df[df["row_id"].astype(str) != str(row_id)]
+    _write(_project_tasks_path(user_key), df, schemas.PROJECT_TASKS)
+
+
 def get_targets(user_key, month):
     df = _read(_targets_path(user_key), schemas.MONTHLY_TARGETS)
     return df[df["month"] == month]
