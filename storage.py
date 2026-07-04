@@ -2282,3 +2282,62 @@ def save_learnings_digest(user_key, brief, source_count):
     df = pd.DataFrame([{"user_key": user_key, "brief": str(brief or ""),
                         "source_count": str(source_count), "updated_at": _now()}])
     _write(_learnings_digest_path(user_key), df, schemas.LEARNINGS_DIGEST)
+
+
+# ---------------------------------------------------------------- login log + bulk KRA
+
+def _login_log_path(user_key):
+    return os.path.join(_user_dir(user_key), "login_log.xlsx")
+
+
+def record_login(user_key):
+    """Record a successful sign-in for today — one row per user per day, bumping a count.
+    Best-effort: never blocks sign-in if the write fails."""
+    try:
+        today = datetime.now().strftime("%Y-%m-%d")
+        df = _read(_login_log_path(user_key), schemas.LOGIN_LOG)
+        if not df.empty and (df["day"].astype(str) == today).any():
+            i = df[df["day"].astype(str) == today].index[0]
+            try:
+                cnt = int(float(df.loc[i, "count"] or 0)) + 1
+            except Exception:
+                cnt = 1
+            df.loc[i, "count"] = str(cnt)
+            df.loc[i, "last_at"] = _now()
+        else:
+            row = {"user_key": user_key, "day": today, "last_at": _now(), "count": "1"}
+            df = pd.DataFrame([row]) if df.empty else pd.concat(
+                [df, pd.DataFrame([row])], ignore_index=True)
+        _write(_login_log_path(user_key), df, schemas.LOGIN_LOG)
+    except Exception:
+        pass
+
+
+def logged_in_today(user_key):
+    """True if this user has a login recorded for today."""
+    try:
+        today = datetime.now().strftime("%Y-%m-%d")
+        df = _read(_login_log_path(user_key), schemas.LOGIN_LOG)
+        return (not df.empty) and (df["day"].astype(str) == today).any()
+    except Exception:
+        return False
+
+
+def set_kras_bulk(user_key, mapping):
+    """Set kra_resolved on many tasks in a SINGLE write. mapping = {task_id: kra_value}.
+    Returns the number of tasks updated."""
+    if not mapping:
+        return 0
+    df = _read(_tasks_path(user_key), schemas.TASKS)
+    if df.empty:
+        return 0
+    n = 0
+    for tid, kra in mapping.items():
+        m = df["task_id"].astype(str) == str(tid)
+        if m.any():
+            df.loc[m, "kra_resolved"] = kra
+            df.loc[m, "updated_at"] = _now()
+            n += 1
+    if n:
+        _write(_tasks_path(user_key), df, schemas.TASKS)
+    return n

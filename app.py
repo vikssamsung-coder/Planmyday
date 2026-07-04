@@ -175,6 +175,7 @@ def login_view():
             user = storage.authenticate(uk, pw)
             if user:
                 st.session_state.user = user
+                storage.record_login(user["user_key"])   # track daily sign-in for Admin panel
                 st.rerun()
             else:
                 st.error("Wrong username or password.")
@@ -2187,27 +2188,32 @@ def effort_view(user):
     # ---- date filter: quick chips + custom from/to ----
     from datetime import timedelta
     today = TODAY
-    state_key = "effort_range"
-    if state_key not in st.session_state:
-        st.session_state[state_key] = (today.replace(day=1), today)   # month-to-date default
+    # Pickers own the range (keyed widgets). Chips write to the widget keys and rerun, so the
+    # pickers are the single source of truth. The old code kept a separate range and re-read
+    # the pickers into it — but a keyed date_input ignores value= once it exists, so its stale
+    # value overwrote whatever a chip set. That's why Today/All looked dead.
+    if "eff_from" not in st.session_state:
+        st.session_state.eff_from = today.replace(day=1)   # month-to-date default
+        st.session_state.eff_to = today
 
     chips = st.columns([1, 1, 1, 1, 3])
     if chips[0].button("Today", key="eff_today", use_container_width=True):
-        st.session_state[state_key] = (today, today)
+        st.session_state.eff_from, st.session_state.eff_to = today, today
+        st.rerun()
     if chips[1].button("This Week", key="eff_week", use_container_width=True):
-        st.session_state[state_key] = (today - timedelta(days=today.weekday()), today)
+        st.session_state.eff_from = today - timedelta(days=today.weekday())
+        st.session_state.eff_to = today
+        st.rerun()
     if chips[2].button("This Month", key="eff_month", use_container_width=True):
-        st.session_state[state_key] = (today.replace(day=1), today)
+        st.session_state.eff_from, st.session_state.eff_to = today.replace(day=1), today
+        st.rerun()
     if chips[3].button("All", key="eff_all", use_container_width=True):
-        st.session_state[state_key] = (date(2020, 1, 1), today)
+        st.session_state.eff_from, st.session_state.eff_to = date(2020, 1, 1), today
+        st.rerun()
 
-    d_from, d_to = st.session_state[state_key]
     cc = st.columns([1, 1, 3])
-    nf = cc[0].date_input("From", value=d_from, key="eff_from")
-    nt = cc[1].date_input("To", value=d_to, key="eff_to")
-    if (nf, nt) != (d_from, d_to):
-        st.session_state[state_key] = (nf, nt)
-        d_from, d_to = nf, nt
+    d_from = cc[0].date_input("From", key="eff_from")
+    d_to = cc[1].date_input("To", key="eff_to")
 
     # ---- gather tasks in range ----
     fs, ts = d_from.strftime("%Y-%m-%d"), d_to.strftime("%Y-%m-%d")
@@ -2639,26 +2645,32 @@ def history_view(user):
         kra_opts = list(kpis) + [classify.LEARNING_KRA]
         with st.expander(f"🏷️ Assign a KRA — {len(pend)} task(s) need one", expanded=False):
             st.caption("These tasks aren't linked to any goal yet, so they show as "
-                       "“Unassigned” in Where My Energy Goes. Pick the KRA each one served.")
+                       "“Unassigned” in Where My Energy Goes. Pick the KRA each one served, "
+                       "then press Save all — they save together in one go.")
             # show the most recent ones first, cap the list so it stays manageable
             pend_sorted = sorted(pend, key=lambda t: str(t.get("plan_date", "")), reverse=True)[:25]
             for t in pend_sorted:
                 tid = t["task_id"]
-                cc = st.columns([4, 3, 1])
+                cc = st.columns([4, 3])
                 cc[0].markdown(f"**{t.get('title','(untitled)')}**  \n"
                                f"<span style='color:#5C6B7A;font-size:12px;'>{t.get('plan_date','')}</span>",
                                unsafe_allow_html=True)
-                choice = cc[1].selectbox("KRA", ["— pick —"] + kra_opts + ["Not goal-related"],
-                                         key=f"kra_pick_{tid}", label_visibility="collapsed")
-                if cc[2].button("Save", key=f"kra_save_{tid}"):
+                cc[1].selectbox("KRA", ["— pick —"] + kra_opts + ["Not goal-related"],
+                                key=f"kra_pick_{tid}", label_visibility="collapsed")
+            if st.button("💾 Save all", type="primary", key="kra_save_all"):
+                mapping = {}
+                for t in pend_sorted:
+                    tid = t["task_id"]
+                    choice = st.session_state.get(f"kra_pick_{tid}", "— pick —")
                     if choice and choice != "— pick —":
-                        val = "" if choice == "Not goal-related" else choice
-                        # "Not goal-related" -> mark resolved as Unassigned so it stops re-appearing
-                        storage.update_task(uk, tid, kra_resolved=(val or "Unassigned"))
-                        st.success("Saved — Where My Energy Goes will reflect it.")
-                        st.rerun()
-                    else:
-                        st.warning("Pick a KRA first.")
+                        # "Not goal-related" -> Unassigned so it stops re-appearing
+                        mapping[tid] = "Unassigned" if choice == "Not goal-related" else choice
+                if mapping:
+                    n = storage.set_kras_bulk(uk, mapping)
+                    st.success(f"Saved {n} — Where My Energy Goes will reflect it.")
+                    st.rerun()
+                else:
+                    st.warning("Pick a KRA for at least one task first.")
 
     # reopen control for done/dropped tasks
     closed = storage.get_tasks(uk)
@@ -3188,7 +3200,8 @@ def admin_view(user):
     if not _is_admin(user):
         st.error("Admins only."); return
     st.markdown("### 🛡️ Admin — content & MIS")
-    tab_pub, tab_manage, tab_mis = st.tabs(["Publish", "Manage", "MIS push"])
+    tab_pub, tab_manage, tab_mis, tab_team = st.tabs(
+        ["Publish", "Manage", "MIS push", "Team status"])
 
     # ---- Publish ----
     with tab_pub:
@@ -3339,6 +3352,57 @@ def admin_view(user):
                 with st.expander("Details"):
                     st.write("\n".join(log[:200]))
                 st.session_state.pop("adm_mis_rows", None)
+
+    # ---- Team status: everyone's day at a glance ----
+    with tab_team:
+        st.caption(f"Everyone's status for today · {TODAY_STR}. See who has logged in, who "
+                   "has closed their day, and open anyone's Progress Brief.")
+        users = storage.get_users()
+        people = ([u for _, u in users.iterrows()
+                   if str(u.get("role", "")).upper() != "ADMIN"]
+                  if not users.empty else [])
+        if not people:
+            st.info("No users yet.")
+        else:
+            n = len(people)
+            n_login = sum(1 for u in people if storage.logged_in_today(u["user_key"]))
+            n_closed = sum(1 for u in people
+                           if storage.is_day_closed(u["user_key"], TODAY_STR))
+            m = st.columns(3)
+            m[0].metric("Team", n)
+            m[1].metric("Logged in today", f"{n_login}/{n}")
+            m[2].metric("Closed the day", f"{n_closed}/{n}")
+            st.divider()
+            hc = st.columns([3, 2, 2, 3])
+            for col, lbl in zip(hc, ["Member", "Logged in", "Closed day", "Progress Brief"]):
+                col.markdown(f"<span style='font-size:12px;font-weight:700;color:#5C6B7A;'>"
+                             f"{lbl}</span>", unsafe_allow_html=True)
+            for u in sorted(people, key=lambda x: str(x.get("name", ""))):
+                uk2 = str(u["user_key"])
+                li = storage.logged_in_today(uk2)
+                cd = storage.is_day_closed(uk2, TODAY_STR)
+                rc = st.columns([3, 2, 2, 3])
+                rc[0].markdown(
+                    f"**{u.get('name', uk2)}**  \n"
+                    f"<span style='color:#5C6B7A;font-size:12px;'>"
+                    f"{str(u.get('role','')).replace('_',' ').title()}</span>",
+                    unsafe_allow_html=True)
+                rc[1].markdown("🔓 Yes" if li else "🔒 Not yet")
+                rc[2].markdown("🌙 Closed" if cd else "☀️ Open")
+                if rc[3].button("📄 Build brief", key=f"tb_pb_{uk2}"):
+                    try:
+                        st.session_state[f"tb_pbdata_{uk2}"] = dsr.build_docx(
+                            dict(u), TODAY_STR, MONTH)
+                    except Exception as e:
+                        st.session_state[f"tb_pbdata_{uk2}"] = None
+                        st.warning(f"Couldn't build brief for {u.get('name', uk2)}: {e}")
+                if st.session_state.get(f"tb_pbdata_{uk2}"):
+                    rc[3].download_button(
+                        "⬇ Download", data=st.session_state[f"tb_pbdata_{uk2}"],
+                        file_name=f"ProgressBrief_{uk2}_{TODAY_STR}.docx",
+                        mime=("application/vnd.openxmlformats-officedocument."
+                              "wordprocessingml.document"),
+                        key=f"tb_pbdl_{uk2}")
 
 
 def main():

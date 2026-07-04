@@ -212,3 +212,7 @@ PROJECT_TASKS = [
     "start_date", "end_date", "percent", "notes", "sort_order",
     "created_at", "updated_at",
 ]
+
+# Login log — one row per user per day (day = YYYY-MM-DD). Written at each successful
+# sign-in; the Admin "Team status" panel reads it to show who has logged in today.
+LOGIN_LOG = ["user_key", "day", "last_at", "count"]
