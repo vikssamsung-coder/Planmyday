@@ -3184,8 +3184,8 @@ def admin_view(user):
     if not _is_admin(user):
         st.error("Admins only."); return
     st.markdown("### 🛡️ Admin — content & MIS")
-    tab_pub, tab_manage, tab_mis, tab_team = st.tabs(
-        ["Publish", "Manage", "MIS push", "Team status"])
+    tab_pub, tab_manage, tab_mis, tab_team, tab_analysis = st.tabs(
+        ["Publish", "Manage", "MIS push", "Team status", "Analysis"])
 
     # ---- Publish ----
     with tab_pub:
@@ -3387,6 +3387,96 @@ def admin_view(user):
                         mime=("application/vnd.openxmlformats-officedocument."
                               "wordprocessingml.document"),
                         key=f"tb_pbdl_{uk2}")
+
+    # ---- Analysis: daily task / KPI / effort report across the team ----
+    with tab_analysis:
+        import admin_report
+        import pandas as _pd
+        st.caption("Daily task completion, goal alignment, and effort — per user, for one day.")
+        rep_date = st.date_input("Date", value=TODAY, key="adm_rep_date", format="DD/MM/YYYY")
+        rep_str = rep_date.strftime("%Y-%m-%d")
+        is_today = rep_str == TODAY_STR
+
+        users = storage.get_users()
+        people = ([u for _, u in users.iterrows()
+                   if str(u.get("role", "")).upper() != "ADMIN"]
+                  if not users.empty else [])
+        if not people:
+            st.info("No users yet.")
+        else:
+            analyses = [admin_report.user_analysis(u["user_key"], dict(u), rep_str)
+                        for u in people]
+
+            # ---- team roll-up: is the team's effort pointed at goals? ----
+            n = len(analyses)
+            tot_tasks = sum(a["tasks_total"] for a in analyses)
+            tot_done = sum(a["done"] for a in analyses)
+            tot_aligned = sum(a["aligned"] for a in analyses)
+            tot_counted = sum(a["aligned"] + a["unaligned"] for a in analyses)
+            team_completion = round(100 * tot_done / tot_tasks) if tot_tasks else 0
+            team_aligned = round(100 * tot_aligned / tot_counted) if tot_counted else 0
+            n_closed = sum(1 for a in analyses if a["closed"])
+            m = st.columns(4)
+            m[0].metric("Team completion", f"{team_completion}%")
+            m[1].metric("Tasks goal-aligned", f"{team_aligned}%")
+            m[2].metric("Closed the day", f"{n_closed}/{n}")
+            if is_today:
+                n_login = sum(1 for u in people if storage.logged_in_today(u["user_key"]))
+                m[3].metric("Logged in today", f"{n_login}/{n}")
+
+            # ---- summary table (one row per user) ----
+            summ = _pd.DataFrame([{
+                "User": a["name"], "Tasks": a["tasks_total"], "Done": a["done"],
+                "Open": a["open"], "Compl %": a["completion"],
+                "Today": a["today_h"], "Build": a["build_h"],
+                "Aligned": a["aligned"], "Unaligned": a["unaligned"],
+                "Targets": f"{a['targets_done']}/{a['targets_set']}",
+                "Top KRA": a["top_kra"] or "—",
+                "Closed": "✓" if a["closed"] else "—",
+            } for a in analyses])
+            st.dataframe(summ, use_container_width=True, hide_index=True)
+
+            try:
+                xlsx = admin_report.build_xlsx(rep_str, analyses)
+                st.download_button(
+                    "⬇️ Download Excel report", data=xlsx,
+                    file_name=f"TeamAnalysis_{rep_str}.xlsx",
+                    mime=("application/vnd.openxmlformats-officedocument."
+                          "spreadsheetml.sheet"),
+                    type="primary", key="adm_rep_dl")
+            except Exception as e:
+                st.warning(f"Couldn't build the Excel: {e}")
+
+            # ---- per-user drill-down: targets, tasks, effort matrix ----
+            st.markdown("##### Per-user detail")
+            for a in analyses:
+                with st.expander(f"{a['name']} · {a['done']}/{a['tasks_total']} done · "
+                                 f"{a['aligned']} aligned / {a['unaligned']} unaligned"):
+                    if a["goals"]:
+                        st.caption("Targets vs achievement")
+                        st.dataframe(_pd.DataFrame([{
+                            "Target": g["heading"], "Aim": g.get("target_number", "") or "—",
+                            "Achieved": g.get("achieved", "") or "—"} for g in a["goals"]]),
+                            use_container_width=True, hide_index=True)
+                    tdf = a["tasks"]
+                    if tdf is not None and len(tdf):
+                        st.caption("Tasks")
+                        st.dataframe(_pd.DataFrame([{
+                            "Task": t.get("title", ""), "Goal": t.get("day_goal", "") or "—",
+                            "Horizon": t.get("horizon", "") or "Today",
+                            "Status": t.get("status", "")} for _, t in tdf.iterrows()]),
+                            use_container_width=True, hide_index=True)
+                    else:
+                        st.caption("No tasks this day.")
+                    rows, cols, counts, row_tot, col_tot, grand = a["matrix"]
+                    if grand:
+                        st.caption("Effort matrix — task counts by KRA × type")
+                        mat = _pd.DataFrame(
+                            {c: {r: counts[r][c] for r in rows} for c in cols})
+                        mat["TOTAL"] = [row_tot[r] for r in rows]
+                        st.dataframe(mat, use_container_width=True)
+                    else:
+                        st.caption("No effort data this day.")
 
 
 def main():
