@@ -132,20 +132,13 @@ def build_docx(user, date, month):
            widths=[1.7, 1.7, 1.7, 1.7])
 
     _heading(doc, "Today's targets vs achievement")
-    _blurb(doc, "What you aimed for today (from your daily goal sheet) vs what you achieved.")
+    _blurb(doc, "What you aimed for today and what you achieved, taken from your daily targets.")
     rows = []
-    for _, r in targets.iterrows():
-        kpi = r["kpi_name"]; tgt = ""
-        for g in day_goals:
-            if g["heading"] and nudge.goal_served(g["heading"], [kpi]):
-                tgt = g["target_number"]; break
-        ach = ""
-        if not prog_today.empty:
-            hit = prog_today[prog_today["kpi_name"] == kpi]
-            if not hit.empty:
-                ach = hit.iloc[0]["achieved"]
-        rows.append([kpi, tgt or "\u2014", ach or "\u2014"])
-    _table(doc, ["KPI", "Target", "Achievement"], rows or [["No targets set", "", ""]],
+    for g in day_goals:
+        if g["heading"]:
+            rows.append([g["heading"], g.get("target_number") or "\u2014",
+                         g.get("achieved") or "\u2014"])
+    _table(doc, ["Target", "Aim", "Achievement"], rows or [["No targets set", "", ""]],
            widths=[3.4, 1.5, 1.5])
 
     _heading(doc, "Tasks & coaching")

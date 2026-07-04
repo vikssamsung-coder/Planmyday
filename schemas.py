@@ -60,7 +60,7 @@ EFFORT_KRAS = ["user_key", "kra_name", "sort_order", "created_at"]
 DAY_GOALS = [
     "date", "user_key", "slot",       # slot 1..4
     "heading",                        # max 2 words
-    "target_number",
+    "target_number", "achieved",      # achieved = what was done today (entered before close)
     "created_at", "updated_at",
 ]
 

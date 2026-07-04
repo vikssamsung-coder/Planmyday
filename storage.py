@@ -827,13 +827,19 @@ def get_day_goals(user_key, date):
             "slot": s,
             "heading": (r["heading"] if r is not None else "") or "",
             "target_number": (r["target_number"] if r is not None else "") or "",
+            "achieved": (r.get("achieved", "") if r is not None else "") or "",
         })
     return out
 
 
 def save_day_goals(user_key, date, goals):
-    """goals: list of {slot, heading, target_number}. Replaces the day's rows."""
+    """goals: list of {slot, heading, target_number}. Replaces the day's rows.
+    Preserves any `achieved` already entered for a slot so editing targets doesn't wipe it."""
     df = _read(_day_goals_path(user_key), schemas.DAY_GOALS)
+    existing = df[df["date"] == date]
+    ach_by_slot = {}
+    for _, r in existing.iterrows():
+        ach_by_slot[str(r["slot"])] = (r.get("achieved", "") if hasattr(r, "get") else "") or ""
     df = df[df["date"] != date]                      # drop old rows for this date
     rows = []
     for g in goals:
@@ -845,12 +851,32 @@ def save_day_goals(user_key, date, goals):
         rows.append({
             "date": date, "user_key": user_key, "slot": g.get("slot", ""),
             "heading": heading, "target_number": g.get("target_number", ""),
+            "achieved": ach_by_slot.get(str(g.get("slot", "")), ""),
             "created_at": _now(), "updated_at": _now(),
         })
     if rows:
         df = pd.concat([df, pd.DataFrame(rows)], ignore_index=True)
     _write(_day_goals_path(user_key), df, schemas.DAY_GOALS)
     return rows
+
+
+def set_day_achievements(user_key, date, by_slot):
+    """Update the `achieved` value on today's targets. by_slot = {slot: achieved_text}.
+    Returns the number of targets updated."""
+    df = _read(_day_goals_path(user_key), schemas.DAY_GOALS)
+    if df.empty:
+        return 0
+    mask_date = df["date"] == date
+    n = 0
+    for slot, ach in by_slot.items():
+        m = mask_date & (df["slot"].astype(str) == str(slot))
+        if m.any():
+            df.loc[m, "achieved"] = ach
+            df.loc[m, "updated_at"] = _now()
+            n += 1
+    if n:
+        _write(_day_goals_path(user_key), df, schemas.DAY_GOALS)
+    return n
 
 
 def day_goal_headings(user_key, date):
@@ -2321,6 +2347,23 @@ def logged_in_today(user_key):
         return (not df.empty) and (df["day"].astype(str) == today).any()
     except Exception:
         return False
+
+
+def login_time_today(user_key):
+    """Today's login time as 'HH:MM' (the last sign-in), or '' if not logged in today."""
+    try:
+        today = datetime.now().strftime("%Y-%m-%d")
+        df = _read(_login_log_path(user_key), schemas.LOGIN_LOG)
+        if df.empty:
+            return ""
+        m = df[df["day"].astype(str) == today]
+        if m.empty:
+            return ""
+        ts = str(m.iloc[0].get("last_at", "") or "")   # 'YYYY-MM-DD HH:MM:SS'
+        parts = ts.split(" ")
+        return parts[1][:5] if len(parts) == 2 and len(parts[1]) >= 5 else ts
+    except Exception:
+        return ""
 
 
 def set_kras_bulk(user_key, mapping):

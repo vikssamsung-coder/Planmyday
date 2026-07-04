@@ -390,6 +390,35 @@ def render_daily_targets(user):
     return headings
 
 
+def _daily_achievement(user):
+    """Below the targets: enter what was ACHIEVED against each of today's targets, saved
+    together with one Update button. Fill this before you close the day — it flows straight
+    into the Progress Brief's 'targets vs achievement' table."""
+    uk = user["user_key"]
+    goals = [g for g in storage.get_day_goals(uk, TODAY_STR) if g["heading"]]
+    if not goals:
+        return
+    with st.container(border=True):
+        st.markdown("##### 📊 Today's achievement")
+        st.caption("Update what you achieved against each target — do this before you close the day.")
+        cols = st.columns(len(goals))
+        for i, g in enumerate(goals):
+            with cols[i]:
+                st.markdown(
+                    f"**{g['heading']}**  \n"
+                    f"<span style='font-size:12px;color:#5C6B7A;'>target: "
+                    f"{g['target_number'] or '—'}</span>", unsafe_allow_html=True)
+                st.text_input("Achieved", value=g.get("achieved", "") or "",
+                              key=f"ach_{g['slot']}", placeholder="e.g. 62K",
+                              label_visibility="collapsed")
+        if st.button("💾 Update achievement", key="ach_update", type="primary",
+                     use_container_width=True):
+            by_slot = {g["slot"]: st.session_state.get(f"ach_{g['slot']}", "") for g in goals}
+            storage.set_day_achievements(uk, TODAY_STR, by_slot)
+            st.success("Achievement updated — it'll show in your Progress Brief.")
+            st.rerun()
+
+
 def _apply_merge_plan(uk, mr, decisions):
     """Apply the user-reviewed merge plan: skip duplicates, group/attach into headers with
     subtasks (steps), add the rest. Unchecked suggestions fall back to adding individually."""
@@ -496,6 +525,9 @@ def plan_and_tasks(user, cards):
         return
 
     headings = render_daily_targets(user)
+
+    # enter what was achieved against today's targets (fill before closing the day)
+    _daily_achievement(user)
 
     # live admin banners (announcements) surface here
     _today_banners(user)
@@ -803,23 +835,14 @@ def _close_my_day(uk, user, tasks):
             pass
         st.session_state["dsr_saved_date"] = TODAY_STR
 
-    fa = st.columns(2)
     if dsr_bytes is not None:
-        fa[0].download_button("⬇️ Download Progress Brief (Word)",
-                              data=dsr_bytes,
-                              file_name=f"ProgressBrief_{user['user_key']}_{TODAY_STR}.docx",
-                              mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                              type="primary", use_container_width=True)
+        st.download_button("⬇️ Download Progress Brief (Word)",
+                           data=dsr_bytes,
+                           file_name=f"ProgressBrief_{user['user_key']}_{TODAY_STR}.docx",
+                           mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                           type="primary", use_container_width=True)
     else:
-        fa[0].button("⬇️ Progress Brief unavailable", disabled=True, use_container_width=True)
-    if fa[1].button("☁️ Back up to Google Sheets", key="closeday_backup",
-                    use_container_width=True):
-        with st.spinner("Backing up…"):
-            pushed, _, err = storage.sync_to_sheets(uk, force=True)
-        import time as _t
-        st.session_state["last_backup_ts"] = _t.time()
-        (st.success if not err else st.warning)(
-            f"Backed up {pushed} file(s)." if not err else f"Backup issue: {err}")
+        st.button("⬇️ Progress Brief unavailable", disabled=True, use_container_width=True)
 
     # Close the day = download the report (above) + mark it closed, so tomorrow doesn't block.
     if storage.is_day_closed(uk, TODAY_STR):
@@ -1152,6 +1175,11 @@ def _task_card(uk, task_id, headings, role_prompt="", seq=None, first=False):
                         storage.log_task_event(uk, task_id, t["title"], "steps_added", cur_goal,
                                                detail=f"{len(s)} steps" + (f" (from '{matched}')" if past else ""))
                     _rerun("fragment")
+            else:
+                # task HAS steps — still give a direct way to complete the whole task
+                # (ticking every step + Save also completes it, but this never hides the Done).
+                if st.button("✅ Mark done", key=f"done_{task_id}", use_container_width=True):
+                    storage.update_task(uk, task_id, status="Done"); _rerun("app")
 
             # ===================== SECONDARY: everything else, one place =====================
             with st.popover("⚙️ Options", use_container_width=True):
@@ -1596,22 +1624,16 @@ def today_view(user):
     # Close My Day — a FOOTER you open with a button (so closing tasks never pops it open).
     #  Shows weekdays after 4 PM, in the morning if the last working day wasn't closed, OR
     #  whenever the "Close your Day" bar set the flag.
-    if _should_show_close_my_day(uk) or st.session_state.get("closeday_open"):
+    # Close My Day ritual — opened ONLY by the "🌙 Close your Day" button under the targets
+    # (single entry point; the old footer "Open Close My Day" bar has been removed).
+    if st.session_state.get("closeday_open"):
         st.divider()
-        if not st.session_state.get("closeday_open"):
-            st.markdown('<div class="closeday-bar">🌙 Close My Day (Today)'
-                        '<span class="sub">Wrap up — today\'s numbers, cue check-ins, Progress Brief & backup</span>'
-                        '</div>', unsafe_allow_html=True)
-            if st.button("🌙 Open Close My Day (Today)", use_container_width=True, key="open_closeday"):
-                st.session_state["closeday_open"] = True
+        mid = st.columns([1, 6, 1])[1]
+        with mid:
+            if st.button("✖ Collapse", key="hide_closeday"):
+                st.session_state["closeday_open"] = False
                 st.rerun()
-        else:
-            mid = st.columns([1, 6, 1])[1]
-            with mid:
-                if st.button("✖ Collapse", key="hide_closeday"):
-                    st.session_state["closeday_open"] = False
-                    st.rerun()
-                _close_my_day(uk, user, storage.get_tasks(uk, TODAY_STR))
+            _close_my_day(uk, user, storage.get_tasks(uk, TODAY_STR))
 
 
 def _ensure_mis_brief(uk, user, force=False):
@@ -1805,49 +1827,11 @@ def communicate_view(user):
 def settings_view(user):
     st.markdown("### ⚙️ Settings")
 
-    # ---- storage / backup (local-first; Sheets is a periodic backup mirror) ----
-    st.markdown("#### Storage & backup")
-    st.caption("Your data is saved **locally on this machine** (instant, always available). "
-               "It's backed up to Google Sheets automatically every ~30 minutes while the "
-               "app is open, and when you Close My Day.")
+    # ---- storage ----
+    st.markdown("#### Storage")
+    st.caption("Your data is saved automatically to the app's secure cloud database — "
+               "nothing to back up by hand.")
     uk = user["user_key"]
-    try:
-        import gsheets
-        backup_on = gsheets.enabled()
-    except Exception:
-        backup_on = False
-
-    info = st.session_state.get("last_backup_info")
-    last_ts = st.session_state.get("last_backup_ts")
-    if last_ts:
-        import datetime as _dt
-        when = _dt.datetime.fromtimestamp(last_ts).strftime("%I:%M %p")
-        st.caption(f"Last backup: {when}" + (f" · {info}" if info else ""))
-    else:
-        st.caption("No backup yet this session.")
-
-    bc = st.columns(2)
-    if bc[0].button("☁️ Back up now", use_container_width=True, disabled=not backup_on):
-        with st.spinner("Backing up to Google Sheets…"):
-            pushed, skipped, err = storage.sync_to_sheets(uk, force=True)
-        import time as _t
-        st.session_state["last_backup_ts"] = _t.time()
-        if err:
-            st.warning(f"Backed up {pushed}, with issues: {err}")
-        else:
-            st.success(f"Backed up {pushed} file(s).")
-    with bc[1].popover("⬇️ Restore from backup", use_container_width=True):
-        st.caption("Pull your data **down** from Google Sheets into this machine — use only "
-                   "on a new/wiped computer. This overwrites local files.")
-        if st.button("Yes, restore from backup", key="do_restore", disabled=not backup_on):
-            with st.spinner("Restoring…"):
-                restored, err = storage.restore_from_sheets(uk)
-            (st.success if not err else st.warning)(
-                f"Restored {restored} file(s). Reload the app." if not err
-                else f"Restored {restored}, with issues: {err}")
-    if not backup_on:
-        st.caption("⚠️ Google Sheets backup isn't configured (add SHEET_ID + credentials in "
-                   "secrets). Your data is still saved locally.")
 
     st.divider()
     # ---- account ----
@@ -3379,7 +3363,7 @@ def admin_view(user):
                              f"{lbl}</span>", unsafe_allow_html=True)
             for u in sorted(people, key=lambda x: str(x.get("name", ""))):
                 uk2 = str(u["user_key"])
-                li = storage.logged_in_today(uk2)
+                lt = storage.login_time_today(uk2)   # 'HH:MM' if logged in today, else ''
                 cd = storage.is_day_closed(uk2, TODAY_STR)
                 rc = st.columns([3, 2, 2, 3])
                 rc[0].markdown(
@@ -3387,7 +3371,7 @@ def admin_view(user):
                     f"<span style='color:#5C6B7A;font-size:12px;'>"
                     f"{str(u.get('role','')).replace('_',' ').title()}</span>",
                     unsafe_allow_html=True)
-                rc[1].markdown("🔓 Yes" if li else "🔒 Not yet")
+                rc[1].markdown(f"🔓 {lt}" if lt else "🔒 Not yet")
                 rc[2].markdown("🌙 Closed" if cd else "☀️ Open")
                 if rc[3].button("📄 Build brief", key=f"tb_pb_{uk2}"):
                     try:
