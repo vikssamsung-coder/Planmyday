@@ -62,6 +62,29 @@ hr{ border-color:var(--line); margin:1.1rem 0; }
   filter:brightness(1.04); transform:translateY(-1px);
 }
 
+/* --- click feedback (client-side, instant — no rerun needed) --- */
+/* the press itself: button sinks + darkens the moment it's clicked */
+.stButton > button:active, .stFormSubmitButton > button:active,
+.stDownloadButton > button:active{
+  transform:translateY(1px) scale(.99) !important;
+  filter:brightness(.92);
+  box-shadow:inset 0 3px 8px rgba(27,39,51,.20) !important;
+  transition:transform .04s ease, filter .04s ease;
+}
+/* keep it visibly "armed" from click until the rerun repaints the page */
+.stButton > button:focus-visible, .stFormSubmitButton > button:focus-visible,
+.stDownloadButton > button:focus-visible{
+  outline:none; box-shadow:0 0 0 3px rgba(232,131,58,.40) !important;
+}
+/* --- "working" state: a disabled primary/submit button pulses so a slow action
+       reads as busy, not dead. Covers the rerun window CSS :active can't. --- */
+@keyframes pmd-busy{ 0%{opacity:.72} 50%{opacity:1} 100%{opacity:.72} }
+.stButton > button[kind="primary"]:disabled, .stFormSubmitButton > button:disabled{
+  cursor:progress; animation:pmd-busy 1.05s ease-in-out infinite;
+  opacity:1 !important; color:#fff !important; border:none !important; filter:none;
+  background:linear-gradient(180deg,var(--amber),var(--amber-d)) !important;
+}
+
 /* inputs */
 [data-baseweb="input"], [data-baseweb="textarea"], [data-baseweb="select"] > div{
   border-radius:10px !important; border-color:var(--line) !important; background:var(--card) !important;
@@ -178,6 +201,38 @@ hr{ border-color:var(--line); margin:1.1rem 0; }
 
 def inject():
     st.markdown(_CSS, unsafe_allow_html=True)
+
+
+def busy_button(label, key, working="Working…", icon="⏳", **kwargs):
+    """A button that visibly shows it's working across Streamlit's rerun.
+
+    Use for slow actions (close day, build/share brief, sheet sync) so the click
+    always lands visibly and can't be double-fired:
+
+        if style.busy_button("🌙 Close the day", key="close_today_btn",
+                             working="Closing…", type="primary",
+                             use_container_width=True):
+            with st.spinner("Wrapping up…"):
+                ... slow work ...
+            st.toast("Day closed ✅", icon="🌙")
+            st.rerun()
+
+    How it works: the first click flips the button to a disabled, pulsing
+    "⏳ <working>" twin and reruns (cheap → repaints fast), so the user sees the
+    press register. On that busy rerun it returns True — run the slow work there,
+    then call st.rerun() to restore the normal button. The busy flag self-clears,
+    so an error in the work can't leave the button stuck.
+    """
+    flag = f"_busy_{key}"
+    if st.session_state.get(flag):
+        st.session_state[flag] = False          # armed for exactly one work pass
+        kwargs.pop("on_click", None)
+        st.button(f"{icon} {working}", key=f"{key}__busy", disabled=True, **kwargs)
+        return True
+    if st.button(label, key=key, **kwargs):
+        st.session_state[flag] = True
+        st.rerun()
+    return False
 
 
 # option_menu styles tuned to the theme — import and pass to option_menu(styles=...)

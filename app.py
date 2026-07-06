@@ -545,13 +545,14 @@ def plan_and_tasks(user, cards):
         st.session_state["closeday_open"] = True
         st.rerun()
     if _bar[1].button("📤 Share Progress Brief", key="bar_share_brief", use_container_width=True):
-        try:
-            st.session_state["pb_bytes"] = dsr.build_docx(user, TODAY_STR, MONTH)
-            st.session_state["pb_date"] = TODAY_STR
-            st.session_state.pop("pb_err", None)
-        except Exception:
-            st.session_state["pb_bytes"] = None
-            st.session_state["pb_err"] = True
+        with st.spinner("Building your Progress Brief…"):
+            try:
+                st.session_state["pb_bytes"] = dsr.build_docx(user, TODAY_STR, MONTH)
+                st.session_state["pb_date"] = TODAY_STR
+                st.session_state.pop("pb_err", None)
+            except Exception:
+                st.session_state["pb_bytes"] = None
+                st.session_state["pb_err"] = True
     if st.session_state.get("pb_bytes") is not None and st.session_state.get("pb_date") == TODAY_STR:
         st.download_button("⬇️ Download the Progress Brief (Word)",
                            data=st.session_state["pb_bytes"],
@@ -813,11 +814,14 @@ def _close_my_day(uk, user, tasks):
         st.success("✅ Today is closed. Grab the Word file from **📤 Share Progress Brief** "
                    "under your targets.")
     else:
-        if st.button("🌙 Close the day", type="primary", key="close_today_btn",
-                     use_container_width=True):
-            storage.mark_day_closed(uk, TODAY_STR)
-            # classify today's unassigned tasks into KRAs (one batched AI call; never blocks)
-            _resolve_kras_with_ai(uk, storage.get_tasks(uk, TODAY_STR))
+        if style.busy_button("🌙 Close the day", key="close_today_btn",
+                             working="Closing…", type="primary",
+                             use_container_width=True):
+            with st.spinner("Wrapping up your day…"):
+                storage.mark_day_closed(uk, TODAY_STR)
+                # classify today's unassigned tasks into KRAs (one batched AI call)
+                _resolve_kras_with_ai(uk, storage.get_tasks(uk, TODAY_STR))
+            st.toast("Day closed ✅", icon="🌙")
             st.session_state["closeday_open"] = False
             st.rerun()
 
