@@ -132,12 +132,21 @@ def build_docx(user, date, month):
            widths=[1.7, 1.7, 1.7, 1.7])
 
     _heading(doc, "Today's targets vs achievement")
-    _blurb(doc, "What you aimed for today and what you achieved, taken from your daily targets.")
+    _blurb(doc, "What you aimed for today and what you achieved, entered under your targets.")
+    # Achievement is entered in the "Today's achievement" card under the targets (day_goals).
+    # For back-compat, fall back to any value logged in the close-day numbers form
+    # (monthly_progress) for the same date+heading, so nothing entered gets dropped.
+    prog_ach = {}
+    if not prog_today.empty:
+        for _, pr in prog_today.iterrows():
+            prog_ach[str(pr.get("kpi_name", ""))] = str(pr.get("achieved", "") or "")
     rows = []
     for g in day_goals:
         if g["heading"]:
-            rows.append([g["heading"], g.get("target_number") or "\u2014",
-                         g.get("achieved") or "\u2014"])
+            ach = str(g.get("achieved", "") or "").strip()
+            if not ach:
+                ach = str(prog_ach.get(g["heading"], "") or "").strip()
+            rows.append([g["heading"], g.get("target_number") or "\u2014", ach or "\u2014"])
     _table(doc, ["Target", "Aim", "Achievement"], rows or [["No targets set", "", ""]],
            widths=[3.4, 1.5, 1.5])
 

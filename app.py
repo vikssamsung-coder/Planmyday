@@ -732,43 +732,21 @@ def plan_and_tasks(user, cards):
 
 
 def _close_my_day(uk, user, tasks):
-    """End-of-day ritual: update today's numbers, check in on each cued task, then the
-    final actions (download DSR + back up) at the bottom. Open/close is controlled by the
-    caller (a footer button), so task actions never force it open."""
-    # ---- today's numbers — based on the targets the USER SAVED FOR TODAY ----
-    st.markdown("##### Today's numbers")
-    st.caption("Enter what you achieved against the targets you set for today.")
+    """End-of-day ritual: check in on each cued task, then commit the close (one button).
+    Today's targets vs achievement is entered in the "📊 Today's achievement" card under
+    the targets (it feeds the Progress Brief) and is NOT duplicated here. The brief is
+    saved silently on close; download it from "📤 Share Progress Brief" under the targets."""
+    # Today's targets vs achievement is entered in the "📊 Today's achievement" card
+    # directly under the targets (day_goals → flows straight into the Progress Brief);
+    # it is intentionally NOT duplicated here. Nudge if any target is still blank.
     day_goals = storage.get_day_goals(uk, TODAY_STR)
     saved_goals = [g for g in day_goals if str(g.get("heading", "") or "").strip()]
-    existing = storage.get_monthly_progress(uk, month=MONTH)
-    today_prog = existing[existing["date"] == TODAY_STR] if not existing.empty else existing
-    prior = {r["kpi_name"]: r["achieved"] for _, r in today_prog.iterrows()} if not today_prog.empty else {}
-    if saved_goals:
-        with st.form("close_numbers"):
-            entries = {}
-            for i, g in enumerate(saved_goals):
-                heading = g["heading"]
-                tgt = g.get("target_number", "")
-                c = st.columns([3, 2, 2])
-                c[0].markdown(heading)
-                c[1].caption(f"Target: {tgt or '—'}")
-                pv = float(prior.get(heading, 0) or 0)
-                entries[heading] = (c[2].number_input("Achieved", value=pv, step=1.0,
-                                                      key=f"close_ach_{i}",
-                                                      label_visibility="collapsed"), tgt)
-            # action button at the bottom of the block
-            if st.form_submit_button("Save today's numbers", type="primary"):
-                for heading, (ach, tgt) in entries.items():
-                    storage.record_monthly_progress(
-                        uk, TODAY_STR, MONTH, heading, str(tgt or ""),
-                        str(int(ach) if ach == int(ach) else ach))
-                st.success("Numbers saved for today.")
-                st.rerun()
-    else:
-        st.info("You haven't set today's targets yet — set them in the daily goal boxes on "
-                "Today, and you can log your achievement against them here.")
+    missing = [g["heading"] for g in saved_goals if not str(g.get("achieved", "") or "").strip()]
+    if saved_goals and missing:
+        which = ", ".join(missing) if len(missing) <= 3 else f"{len(missing)} targets"
+        st.info(f"📊 Log what you achieved against **{which}** in the *Today's achievement* "
+                "card under your targets — that's what the Progress Brief reports.")
 
-    st.divider()
     # ---- the cue check-ins ----
     st.markdown("##### How did my suggestions go?")
     st.caption("Quick check-in, like a friend would. Wins get saved so I lead with "
@@ -808,23 +786,19 @@ def _close_my_day(uk, user, tasks):
                         st.info("Logged. We'll learn from it.")
                     st.rerun()
 
-    # ---- final actions: DSR (download + silent daily save) + backup ----
+    # ---- commit the close. The Progress Brief is built + saved silently here; download
+    #      it from the "📤 Share Progress Brief" button under your targets. ----
     st.divider()
-    st.markdown("##### Finish")
     try:
         dsr_bytes = dsr.build_docx(user, TODAY_STR, MONTH)
-    except Exception as e:
+    except Exception:
         dsr_bytes = None
-        st.warning(f"Couldn't build the Progress Brief this time ({type(e).__name__}). "
-                   "You can still close the day below — the Progress Brief will generate fine "
-                   "once the underlying data issue is sorted.")
 
-    # save today's DSR silently (text → cloud-synced store + a local Word archive). Once
-    # per session per day; no message — the user just sees the download button.
+    # save today's DSR silently (text → cloud-synced store + a local Word archive),
+    # once per session per day.
     if dsr_bytes is not None and st.session_state.get("dsr_saved_date") != TODAY_STR:
         try:
             storage.save_dsr(uk, TODAY_STR, dsr.docx_to_text(dsr_bytes))
-            # local Word archive in the user's reports folder
             import paths, os as _os
             rep_dir = paths.user_reports_dir(uk)
             _os.makedirs(rep_dir, exist_ok=True)
@@ -835,20 +809,10 @@ def _close_my_day(uk, user, tasks):
             pass
         st.session_state["dsr_saved_date"] = TODAY_STR
 
-    if dsr_bytes is not None:
-        st.download_button("⬇️ Download Progress Brief (Word)",
-                           data=dsr_bytes,
-                           file_name=f"ProgressBrief_{user['user_key']}_{TODAY_STR}.docx",
-                           mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                           type="primary", use_container_width=True)
-    else:
-        st.button("⬇️ Progress Brief unavailable", disabled=True, use_container_width=True)
-
-    # Close the day = download the report (above) + mark it closed, so tomorrow doesn't block.
     if storage.is_day_closed(uk, TODAY_STR):
-        st.success("✅ Today is closed. Progress Brief saved & downloadable above.")
+        st.success("✅ Today is closed. Grab the Word file from **📤 Share Progress Brief** "
+                   "under your targets.")
     else:
-        st.caption("Download the Progress Brief above, then close the day to wrap up.")
         if st.button("🌙 Close the day", type="primary", key="close_today_btn",
                      use_container_width=True):
             storage.mark_day_closed(uk, TODAY_STR)
@@ -856,8 +820,6 @@ def _close_my_day(uk, user, tasks):
             _resolve_kras_with_ai(uk, storage.get_tasks(uk, TODAY_STR))
             st.session_state["closeday_open"] = False
             st.rerun()
-    st.caption("The Progress Brief covers targets vs achievement, tasks & cues, meetings, "
-               "reminders, monthly standing, and what's working. Saved automatically.")
 
 
 def _meeting_form(user):
