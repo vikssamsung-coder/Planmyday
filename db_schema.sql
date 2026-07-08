@@ -226,6 +226,15 @@ CREATE TABLE IF NOT EXISTS monthly_progress (
 );
 CREATE INDEX IF NOT EXISTS ix_monthly_progress_user_key_month ON monthly_progress (user_key, month);
 
+CREATE TABLE IF NOT EXISTS login_log (
+    user_key TEXT,
+    day TEXT,
+    last_at TEXT,
+    count TEXT,
+    PRIMARY KEY (user_key, day)
+);
+CREATE INDEX IF NOT EXISTS ix_login_log_user_key ON login_log (user_key);
+
 CREATE TABLE IF NOT EXISTS outcomes (
     outcome_id TEXT,
     date TEXT,

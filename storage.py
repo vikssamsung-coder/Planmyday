@@ -121,9 +121,32 @@ def local_first():
     return True
 
 
+# ---- selective Neon (Desktop) ----------------------------------------------------------
+# On a LOCAL/desktop machine we keep Neon deliberately thin: only these tabs live in Neon;
+# everything else (tasks, day_goals, meetings, plans, learnings, monthly_progress, MIS
+# targets, role prompts…) stays on the local disk. On Streamlit CLOUD the disk is ephemeral,
+# so the whitelist is BYPASSED and every tab goes to Neon exactly as before.
+#   users_master -> central logins / passwords / roles
+#   login_log    -> login analysis
+#   content      -> CMS updates pushed from the admin
+# (monthly_progress is NOT here: it stays local and is pushed up separately by
+#  sync_daily_progress so the analyst's own views stay fast.)
+NEON_TABLES = {"users_master", "login_log", "content"}
+
+
+def _pg_for(path):
+    """Should this specific path use the Neon backend? On Cloud: yes for everything
+    (ephemeral disk). On a desktop machine: only for the thin whitelist above."""
+    if not _use_pg():
+        return False
+    if _on_cloud_host():
+        return True
+    return _route(path)[1] in NEON_TABLES
+
+
 def _read(path, columns):
-    # Postgres (Neon) backend — used on Cloud when NEON_DATABASE_URL is configured.
-    if _use_pg():
+    # Postgres (Neon) backend — used on Cloud always, on Desktop only for whitelisted tabs.
+    if _pg_for(path):
         title, tab = _route(path)
         # serve from the short-lived cache first — Streamlit reruns the whole script on every
         # interaction and reads the same tables repeatedly; without this each read is a fresh
@@ -172,7 +195,7 @@ def _write(path, df, columns):
         if c not in df.columns:
             df[c] = ""
     # Postgres (Neon) backend
-    if _use_pg():
+    if _pg_for(path):
         title, tab = _route(path)
         db.write_table(tab, title, df, columns)
         _cache_put(title, tab, df[columns])   # keep cache fresh = next read needs no round-trip
@@ -406,6 +429,74 @@ def verify_password(password, stored):
             return False
     # legacy plaintext fallback (re-hash these when convenient)
     return bool(stored) and str(password) == stored
+
+
+def upsert_user(user_key, name, role, password=None, department="", login_role="",
+                active="Yes"):
+    """Create or update a login in the users table (routes to Neon when configured).
+      - user_key is lowercased (matches the login input).
+      - password: pass a plaintext to (re)set it — it is stored HASHED, never in the clear.
+        Pass None/"" to keep the existing password when editing.
+      - role must match a role_prompts/<role>.md file (that decides the coaching prompt),
+        or "ADMIN" for a CMS-only admin login.
+    Returns (action, user_key) where action is "created" or "updated"."""
+    uk = str(user_key or "").strip().lower()
+    if not uk:
+        raise ValueError("username (user_key) is required")
+    df = _read(_users_path(), schemas.USERS)
+    mask = (df["user_key"].astype(str).str.lower() == uk) if not df.empty else None
+    exists = mask is not None and mask.any()
+
+    if password:
+        pw = hash_password(password)
+    elif exists:
+        pw = df.loc[mask, "password"].iloc[0]
+    else:
+        raise ValueError("a password is required for a new user")
+
+    created_at = df.loc[mask, "created_at"].iloc[0] if exists else _now()
+    row = {"user_key": uk, "name": name or uk, "role": role or "",
+           "department": department or "", "login_role": login_role or "",
+           "password": pw, "active": active or "Yes", "created_at": created_at}
+    if exists:
+        i = df[mask].index[0]
+        for k, v in row.items():
+            df.loc[i, k] = v
+        action = "updated"
+    else:
+        df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
+        action = "created"
+    _write(_users_path(), df, schemas.USERS)
+    return action, uk
+
+
+def set_user_active(user_key, active):
+    """Activate/deactivate a login without changing anything else. Returns True if found."""
+    uk = str(user_key or "").strip().lower()
+    df = _read(_users_path(), schemas.USERS)
+    if df.empty:
+        return False
+    m = df["user_key"].astype(str).str.lower() == uk
+    if not m.any():
+        return False
+    df.loc[m, "active"] = "Yes" if str(active).lower() in ("yes", "true", "1", "y") else "No"
+    _write(_users_path(), df, schemas.USERS)
+    return True
+
+
+def ensure_db_schema():
+    """Run the Neon schema DDL (db_schema.sql) against the shared database. Idempotent —
+    every statement is CREATE TABLE / INDEX IF NOT EXISTS, so it only adds what's missing
+    (e.g. the login_log table) and never touches existing data. Both the cloud and desktop
+    apps use this same Neon database, so running it once is enough for both.
+    Returns (ok, message). No-op when Neon isn't configured."""
+    if not _use_pg():
+        return False, "Neon isn't configured (no NEON_DATABASE_URL), so there's no shared database to update."
+    try:
+        db.init_schema()
+        return True, "Database schema updated — all tables ensured in Neon."
+    except Exception as e:
+        return False, f"Schema update failed: {e}"
 
 
 def authenticate(user_key, password):
@@ -1978,6 +2069,39 @@ def mark_day_closed(user_key, date):
     row = {"date": date, "user_key": user_key, "closed_at": _now()}
     df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
     _write(_closed_days_path(user_key), df, schemas.CLOSED_DAYS)
+    sync_daily_progress(user_key)      # push progress up to Neon for the admin (best-effort)
+
+
+def get_team_progress(month=None):
+    """Admin view: every user's progress (planned vs achieved per KPI/date), read from the
+    shared Neon monthly_progress table that desktop machines sync back to on close-day.
+    Returns empty when Neon isn't configured. Optional month filter (YYYY-MM)."""
+    if not _use_pg():
+        return pd.DataFrame(columns=schemas.MONTHLY_PROGRESS)
+    try:
+        df = db.read_all("monthly_progress", schemas.MONTHLY_PROGRESS)
+    except Exception:
+        return pd.DataFrame(columns=schemas.MONTHLY_PROGRESS)
+    if month and not df.empty:
+        df = df[df["month"].astype(str) == str(month)]
+    return df
+
+
+def sync_daily_progress(user_key):
+    """One-way 'sync back' of the user's progress to Neon so the admin can see team
+    progress centrally. monthly_progress stays LOCAL as the source of truth (fast for the
+    user's own brief/Monthly views); this pushes a copy of it into the shared Neon
+    monthly_progress table — the same table the cloud app already reads. Best-effort:
+    never raises, never blocks closing the day. No-op when Neon isn't configured."""
+    if not _use_pg():
+        return
+    if _on_cloud_host():
+        return                          # on Cloud it's already in Neon; nothing to push
+    try:
+        df = get_monthly_progress(user_key)          # local source of truth
+        db.write_table("monthly_progress", user_key, df, schemas.MONTHLY_PROGRESS)
+    except Exception:
+        pass
 
 
 def is_day_closed(user_key, date):

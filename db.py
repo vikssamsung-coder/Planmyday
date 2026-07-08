@@ -177,6 +177,26 @@ def read_table(tab, user_key, columns):
     return df[columns]
 
 
+def read_all(tab, columns):
+    """Every row of a table across ALL users (admin/global read) — used to surface the
+    progress that desktop machines sync back on close-day. Same shaping as read_table."""
+    table = _table_for(tab)
+    with _get_pool().connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(f'SELECT * FROM "{table}"')
+            rows = cur.fetchall()
+            colnames = [d.name for d in cur.description]
+    df = pd.DataFrame(rows, columns=colnames) if rows else pd.DataFrame(columns=colnames)
+    for c in columns:
+        if c not in df.columns:
+            df[c] = ""
+    if not df.empty:
+        df = df.astype(object).where(pd.notnull(df), "")
+        for c in columns:
+            df[c] = df[c].map(lambda v: "" if v is None else str(v))
+    return df[columns]
+
+
 def write_table(tab, user_key, df, columns):
     """Replace this user's rows in the table with `df` (atomic). Global tables replace
     all rows. Mirrors the old 'write the whole sheet' semantics, so storage.py is

@@ -35,6 +35,10 @@ import project_planner
 import workspace as ws
 import style
 import dsr
+try:
+    import reports_engine            # Desktop-only module; may be absent on Cloud
+except Exception:
+    reports_engine = None
 
 st.set_page_config(page_title="Plan My Day", page_icon="🌅", layout="wide")
 
@@ -572,18 +576,10 @@ def plan_and_tasks(user, cards):
 
     # ---- dictate / type to create tasks ----
     st.markdown("##### Today I want to do…")
-    try:
-        from streamlit_mic_recorder import mic_recorder
-        rec = mic_recorder(start_prompt="🎙️ Dictate", stop_prompt="⏹️ Stop",
-                           key="mic", format="wav")
-        if rec and rec.get("bytes"):
-            with st.spinner("Transcribing…"):
-                transcribed = ai.transcribe(rec["bytes"], vocab=_voice_vocab())
-                if transcribed:
-                    # set state BEFORE the widget is instantiated (allowed)
-                    st.session_state.plan_input = transcribed
-    except Exception:
-        st.caption("🎙️ (Install streamlit-mic-recorder for voice; type below for now.)")
+    _t = _dictate_text("plan", "🎙️ Dictate")
+    if _t:
+        # set state BEFORE the widget is instantiated (allowed)
+        st.session_state.plan_input = _t
 
     # one-shot clear requested by a previous run, done before the widget exists
     if st.session_state.pop("_clear_plan", False):
@@ -843,18 +839,10 @@ def _meeting_form(user):
                                                "existing_partner": "PTR123",
                                                "client": "CLI456",
                                                "internal": "name"}.get(mtype, ""))
-    # mic dictation for the outcome (same flow as the Today plan box)
-    try:
-        from streamlit_mic_recorder import mic_recorder
-        rec = mic_recorder(start_prompt="🎙️ Dictate outcome", stop_prompt="⏹️ Stop",
-                           key="mtg_mic", format="wav")
-        if rec and rec.get("bytes"):
-            with st.spinner("Transcribing…"):
-                txt = ai.transcribe(rec["bytes"], vocab=_voice_vocab())
-                if txt:
-                    st.session_state.mtg_raw = txt
-    except Exception:
-        st.caption("🎙️ (Install streamlit-mic-recorder for voice; type below.)")
+    # mic dictation for the outcome — native audio_input (reliable on Cloud)
+    _t = _dictate_text("mtg", "🎙️ Dictate outcome")
+    if _t:
+        st.session_state.mtg_raw = _t
     raw = st.text_area("Outcome (dictate or type what happened)", key="mtg_raw",
                        height=90, placeholder="Met them, showed the platform, "
                        "they liked it but want to think — call back Thursday.")
@@ -1806,6 +1794,15 @@ def settings_view(user):
                 f"· role: {user.get('role','').replace('_',' ').title() or '—'}")
     st.caption(f"Knowledge/data scope: your own workspace ({user['user_key']}).")
 
+    if not storage._on_cloud_host():
+        st.divider()
+        # ---- app updates (Desktop only) ----
+        try:
+            import updater
+            updater.render_update_section(user)
+        except Exception as _e:
+            st.caption("Update tool unavailable: %s" % _e)
+
     st.divider()
     # ---- AI status ----
     st.markdown("#### AI coach")
@@ -2059,6 +2056,52 @@ def _voice_vocab():
         return ", ".join(names[:40])
     except Exception:
         return ""
+
+
+def _dictate_bytes(key, label):
+    """Capture mic audio robustly across environments.
+
+    Prefers Streamlit's NATIVE st.audio_input, which renders reliably on Streamlit
+    Cloud — the third-party streamlit-mic-recorder is a custom component that mounts
+    inside an iframe and frequently fails to appear on Cloud. Falls back to
+    mic_recorder only on older Streamlit that lacks audio_input.
+
+    Returns raw audio bytes for a NEW recording, else None (native audio_input
+    re-returns the same clip on every rerun, so we transcribe each clip only once).
+    """
+    audio_bytes = None
+    if hasattr(st, "audio_input"):
+        clip = st.audio_input(label, key=f"ai_{key}")
+        if clip is not None:
+            audio_bytes = clip.getvalue()
+    else:
+        try:
+            from streamlit_mic_recorder import mic_recorder
+            rec = mic_recorder(start_prompt=label, stop_prompt="⏹️ Stop",
+                               key=f"mr_{key}", format="wav")
+            if rec and rec.get("bytes"):
+                audio_bytes = rec["bytes"]
+        except Exception:
+            st.caption("🎙️ (Voice needs Streamlit ≥1.35 or streamlit-mic-recorder; type below.)")
+            return None
+    if not audio_bytes:
+        return None
+    import hashlib
+    sig = hashlib.md5(audio_bytes).hexdigest()
+    sigk = f"_dictate_sig_{key}"
+    if st.session_state.get(sigk) == sig:
+        return None                       # this clip was already transcribed
+    st.session_state[sigk] = sig
+    return audio_bytes
+
+
+def _dictate_text(key, label):
+    """Capture + transcribe in one call. Returns transcribed text, or '' if nothing new."""
+    b = _dictate_bytes(key, label)
+    if not b:
+        return ""
+    with st.spinner("Transcribing…"):
+        return ai.transcribe(b, vocab=_voice_vocab()) or ""
 
 
 def _resolve_kras_with_ai(uk, tasks_df):
@@ -2702,18 +2745,10 @@ def _learn_dictate(uk, role):
     # clear request from a previous save must happen BEFORE the widget is created
     if st.session_state.pop("_clear_log_text", False):
         st.session_state["log_text"] = ""
-    # mic dictation (component must NOT be inside tabs/expander)
-    try:
-        from streamlit_mic_recorder import mic_recorder
-        rec = mic_recorder(start_prompt="🎙️ Dictate log", stop_prompt="⏹️ Stop",
-                           key="log_mic", format="webm")
-        if rec and rec.get("bytes"):
-            with st.spinner("Transcribing…"):
-                txt = ai.transcribe(rec["bytes"], vocab=_voice_vocab())
-            if txt:
-                st.session_state["log_text"] = (st.session_state.get("log_text", "") + " " + txt).strip()
-    except Exception:
-        st.caption("🎙️ (Install streamlit-mic-recorder for voice; type below.)")
+    # mic dictation — native audio_input (reliable on Cloud)
+    _t = _dictate_text("log", "🎙️ Dictate log")
+    if _t:
+        st.session_state["log_text"] = (st.session_state.get("log_text", "") + " " + _t).strip()
 
     st.text_area("Today's log", key="log_text", height=160,
                  placeholder="What happened today — what you tried, what worked, what didn't, "
@@ -2947,11 +2982,14 @@ def header_nav(is_lead, partner_ok=True, is_admin=False):
         tabs.append("Records")
         if partner_ok:
             tabs.append("Communicate")
-        tabs += ["Updates", "Monthly", "Effort", "Projects", "Learning", "History", "Settings"]
+        tabs += ["Updates", "Monthly", "Effort", "Projects"]
+        if reports_engine is not None and not storage._on_cloud_host():
+            tabs.append("Reports")          # Reports Engine is a Desktop-only local feature
+        tabs += ["Learning", "History", "Settings"]
         icon_map = {"Today": "columns-gap", "Daily log": "notebook", "Records": "address-book",
                     "Communicate": "send", "Updates": "megaphone", "Monthly": "compass",
-                    "Effort": "grid-3x3-gap-fill", "Projects": "kanban", "Learning": "lightbulb",
-                    "History": "history", "Settings": "gear"}
+                    "Effort": "grid-3x3-gap-fill", "Projects": "kanban", "Reports": "bar-chart",
+                    "Learning": "lightbulb", "History": "history", "Settings": "gear"}
     icons = [icon_map[t] for t in tabs]
     if HAVE_OPTION_MENU:
         return option_menu(
@@ -3146,12 +3184,85 @@ def updates_view(user):
 _CONTENT_TYPES = ["banner", "video", "contest", "result", "update"]
 
 
+ROLE_CHOICES = ["sales_rm", "trainer", "b2b", "lead", "member", "partner_acquisition",
+                "retail_acquisition_manager", "retail_acquisition_head", "revenue_head",
+                "partner_experience_head", "quality_training_head",
+                "digital_partner_acquisition", "ADMIN"]
+
+
+def _admin_users_panel():
+    st.markdown("#### Users & logins")
+    st.caption("Create or edit team logins. The **role** decides which Role prompt the "
+               "person gets (it must match a role_prompts/<role>.md file). Passwords are "
+               "stored hashed. Saves to the shared users table (Neon when configured).")
+
+    df = storage.get_users()
+    if df.empty:
+        st.info("No users yet — add one below.")
+    else:
+        hc = st.columns([3, 3, 2, 2])
+        for col, h in zip(hc, ["Name / username", "Role", "Status", ""]):
+            col.markdown(f"<span style='font-size:12px;font-weight:700;color:#5C6B7A;'>{h}</span>",
+                         unsafe_allow_html=True)
+        for _, u in df.sort_values("user_key").iterrows():
+            uk = str(u["user_key"])
+            active = str(u.get("active", "Yes")).strip().lower() in ("yes", "true", "1", "y", "")
+            rc = st.columns([3, 3, 2, 2])
+            rc[0].markdown(f"**{u.get('name') or uk}**  \n`{uk}`")
+            rc[1].markdown((u.get("role", "") or "—").replace("_", " "))
+            rc[2].markdown("🟢 active" if active else "🔴 inactive")
+            if rc[3].button("Deactivate" if active else "Activate", key=f"ua_{uk}"):
+                storage.set_user_active(uk, "No" if active else "Yes")
+                st.rerun()
+
+    st.divider()
+    st.markdown("##### Add or edit a login")
+    st.caption("To edit someone, enter their existing username. Leave the password blank "
+               "to keep the current one; type a new one to reset it.")
+    c = st.columns(2)
+    uk_in = c[0].text_input("Username (user_key)", key="au_uk", placeholder="e.g. rinku")
+    name_in = c[1].text_input("Display name", key="au_name")
+    c2 = st.columns(2)
+    role_in = c2[0].selectbox("Role", ROLE_CHOICES, key="au_role")
+    dept_in = c2[1].text_input("Department (optional)", key="au_dept")
+    pw_in = st.text_input("Password (blank = keep existing when editing)",
+                          type="password", key="au_pw")
+    if st.button("Save login", type="primary", key="au_save"):
+        if not (uk_in or "").strip():
+            st.error("Username is required.")
+        else:
+            try:
+                action, saved = storage.upsert_user(
+                    uk_in, name_in, role_in, password=(pw_in or None),
+                    department=dept_in,
+                    login_role="admin" if role_in == "ADMIN" else "member")
+                st.success(f"Login '{saved}' {action}. They can sign in with this "
+                           "username and password.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Couldn't save: {e}")
+
+    st.divider()
+    with st.expander("⚙️ Database schema (Neon)"):
+        st.caption("Create any missing tables in the shared Neon database (e.g. login_log). "
+                   "Idempotent and safe to run anytime — it only adds what's missing and "
+                   "never touches existing data. Both the cloud and desktop apps use this "
+                   "same database, so running it once here updates it for everyone.")
+        if st.button("Update database schema now", key="db_init_btn"):
+            with st.spinner("Updating Neon schema…"):
+                ok, msg = storage.ensure_db_schema()
+            (st.success if ok else st.error)(msg)
+
+
 def admin_view(user):
     if not _is_admin(user):
         st.error("Admins only."); return
     st.markdown("### 🛡️ Admin — content & MIS")
-    tab_pub, tab_manage, tab_mis, tab_team, tab_analysis = st.tabs(
-        ["Publish", "Manage", "MIS push", "Team status", "Analysis"])
+    tab_pub, tab_manage, tab_mis, tab_users, tab_team, tab_analysis = st.tabs(
+        ["Publish", "Manage", "MIS push", "Users", "Team status", "Analysis"])
+
+    with tab_users:
+        _admin_users_panel()
 
     # ---- Publish ----
     with tab_pub:
@@ -3413,6 +3524,29 @@ def admin_view(user):
             except Exception as e:
                 st.warning(f"Couldn't build the Excel: {e}")
 
+            # ---- team progress synced back from machines (close-day pushes) ----
+            with st.expander("📈 Team progress (synced from machines)"):
+                st.caption("Planned vs achieved per KPI, pushed up when each person closes "
+                           "their day. Populated only when Neon is configured.")
+                tp = storage.get_team_progress(month=MONTH)
+                if tp.empty:
+                    st.info("No synced progress yet for this month.")
+                else:
+                    view = tp[["user_key", "date", "kpi_name", "planned", "achieved"]].copy()
+                    view["planned_n"] = _pd.to_numeric(view["planned"], errors="coerce").fillna(0)
+                    view["achieved_n"] = _pd.to_numeric(view["achieved"], errors="coerce").fillna(0)
+                    view["gap"] = view["achieved_n"] - view["planned_n"]
+                    roll = (view.groupby(["user_key", "kpi_name"], as_index=False)
+                                 .agg(Planned=("planned_n", "sum"),
+                                      Achieved=("achieved_n", "sum"),
+                                      Gap=("gap", "sum")))
+                    roll.columns = ["User", "KPI", "Planned", "Achieved", "Gap"]
+                    st.dataframe(roll, use_container_width=True, hide_index=True)
+                    st.caption("Latest sync per person: "
+                               + ", ".join(sorted(
+                                   f"{u} ({view[view['user_key']==u]['date'].max()})"
+                                   for u in view["user_key"].unique())))
+
             # ---- per-user drill-down: targets, tasks, effort matrix ----
             st.markdown("##### Per-user detail")
             for a in analyses:
@@ -3525,11 +3659,14 @@ def main():
     if choice == "Admin" and not is_admin:
         choice = "Today"
 
-    {"Today": today_view, "Daily log": daily_log_view, "Records": records_view,
+    _routes = {"Today": today_view, "Daily log": daily_log_view, "Records": records_view,
      "Communicate": communicate_view, "Updates": updates_view, "Monthly": monthly_view,
      "Effort": effort_view, "Projects": project_planner.project_view,
      "Learning": learning_view, "History": history_view,
-     "Settings": settings_view, "Admin": admin_view}.get(choice, today_view)(user)
+     "Settings": settings_view, "Admin": admin_view}
+    if reports_engine is not None:
+        _routes["Reports"] = reports_engine.reports_view
+    _routes.get(choice, today_view)(user)
 
 
 if __name__ == "__main__":
