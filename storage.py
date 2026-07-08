@@ -499,6 +499,21 @@ def ensure_db_schema():
         return False, f"Schema update failed: {e}"
 
 
+def verify_user_in_db(user_key):
+    """Read a user STRAIGHT from the Neon backend, bypassing the storage read-cache, to
+    prove whether a write actually persisted. Returns True/False when Neon is the backend,
+    or None when Neon isn't configured (writes went to local files instead)."""
+    uk = str(user_key or "").strip().lower()
+    if not _use_pg():
+        return None
+    try:
+        _cache_clear()
+        df = db.read_table("users_master", "_common", schemas.USERS)
+        return (not df.empty) and (df["user_key"].astype(str).str.lower() == uk).any()
+    except Exception:
+        return False
+
+
 def available_roles():
     """Role names an admin can assign — DISCOVERED from the role_prompts folder(s) so any
     <role>.md you upload to the repo shows up automatically, unioned with the known baseline

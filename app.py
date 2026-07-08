@@ -3242,9 +3242,21 @@ def _admin_users_panel():
                     uk_in, name_in, role_in, password=(pw_in or None),
                     department=dept_in,
                     login_role="admin" if role_in == "ADMIN" else "member")
-                st.success(f"Login '{saved}' {action}. They can sign in with this "
-                           "username and password.")
-                st.rerun()
+                verified = storage.verify_user_in_db(saved)
+                if verified is True:
+                    st.success(f"Login '{saved}' {action} and confirmed in Neon ✅")
+                    st.rerun()
+                elif verified is False:
+                    st.error(
+                        f"'{saved}' was {action} in the app but is NOT readable back from "
+                        f"Neon — the write did not persist to the database. "
+                        f"(Neon backend active: {storage._use_pg()}; "
+                        f"users routed to Neon: {storage._pg_for(storage._users_path())}; "
+                        f"on cloud host: {storage._on_cloud_host()})")
+                else:
+                    st.warning(
+                        f"Login '{saved}' {action}, but Neon is NOT configured — it was "
+                        "saved to LOCAL files, not the shared database. Set NEON_DATABASE_URL.")
             except Exception as e:
                 st.error(f"Couldn't save: {e}")
 
