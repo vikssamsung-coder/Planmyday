@@ -499,6 +499,28 @@ def ensure_db_schema():
         return False, f"Schema update failed: {e}"
 
 
+def available_roles():
+    """Role names an admin can assign — DISCOVERED from the role_prompts folder(s) so any
+    <role>.md you upload to the repo shows up automatically, unioned with the known baseline
+    roles so nothing ever disappears. Excludes the auto-learn (.learn.md) and per-user
+    tweak (tweak_*.md) layers. 'ADMIN' is added by the UI, not here."""
+    import glob
+    KNOWN = {"sales_rm", "trainer", "b2b", "lead", "member", "partner_acquisition",
+             "retail_acquisition_manager", "retail_acquisition_head", "revenue_head",
+             "partner_experience_head", "quality_training_head", "digital_partner_acquisition"}
+    names = set(KNOWN)
+    for d in (paths.role_prompts_dir(), paths.workspace_role_prompts_dir(), paths.role_cache_dir()):
+        try:
+            for p in glob.glob(os.path.join(d, "*.md")):
+                base = os.path.basename(p)
+                if base.endswith(".learn.md") or base.startswith("tweak_"):
+                    continue
+                names.add(base[:-3])          # strip trailing .md
+        except Exception:
+            pass
+    return sorted(names)
+
+
 def authenticate(user_key, password):
     """Verify a login. Returns the user dict on success, else None.
     Login ID = user_key (username); the password is checked against the stored hash

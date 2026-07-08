@@ -3184,12 +3184,6 @@ def updates_view(user):
 _CONTENT_TYPES = ["banner", "video", "contest", "result", "update"]
 
 
-ROLE_CHOICES = ["sales_rm", "trainer", "b2b", "lead", "member", "partner_acquisition",
-                "retail_acquisition_manager", "retail_acquisition_head", "revenue_head",
-                "partner_experience_head", "quality_training_head",
-                "digital_partner_acquisition", "ADMIN"]
-
-
 def _admin_users_panel():
     st.markdown("#### Users & logins")
     st.caption("Create or edit team logins. The **role** decides which Role prompt the "
@@ -3222,14 +3216,26 @@ def _admin_users_panel():
     c = st.columns(2)
     uk_in = c[0].text_input("Username (user_key)", key="au_uk", placeholder="e.g. rinku")
     name_in = c[1].text_input("Display name", key="au_name")
+    # Role options are read live from the repo's role_prompts/ files, so any <role>.md you
+    # upload appears here automatically — plus ADMIN and a type-your-own option.
+    role_list = storage.available_roles()
+    OTHER = "➕ Other (type a name)…"
     c2 = st.columns(2)
-    role_in = c2[0].selectbox("Role", ROLE_CHOICES, key="au_role")
+    role_sel = c2[0].selectbox("Role", role_list + ["ADMIN", OTHER], key="au_role")
     dept_in = c2[1].text_input("Department (optional)", key="au_dept")
+    if role_sel == OTHER:
+        role_in = st.text_input(
+            "Role name — must exactly match a role_prompts/<name>.md in the repo",
+            key="au_role_custom").strip()
+    else:
+        role_in = role_sel
     pw_in = st.text_input("Password (blank = keep existing when editing)",
                           type="password", key="au_pw")
     if st.button("Save login", type="primary", key="au_save"):
         if not (uk_in or "").strip():
             st.error("Username is required.")
+        elif not (role_in or "").strip():
+            st.error("Pick a role, or type one that matches a role_prompts/<name>.md file.")
         else:
             try:
                 action, saved = storage.upsert_user(
