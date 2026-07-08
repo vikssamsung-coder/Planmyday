@@ -113,9 +113,13 @@ def _table_for(tab):
     return TAB_TO_TABLE.get(tab, tab)
 
 
-def table_columns(table):
-    """The actual column names of a table (cached)."""
-    if table in _cols_cache:
+def table_columns(table, refresh=False):
+    """The actual column names of a table. Cached — but NEVER caches an empty result,
+    because an empty list here silently breaks writes (write_table would compute zero
+    columns and swallow the row). If a lookup returns nothing (e.g. the table didn't
+    exist yet), we don't cache it, so the next call re-queries once it does exist.
+    Pass refresh=True to bypass the cache."""
+    if not refresh and _cols_cache.get(table):
         return _cols_cache[table]
     with _get_pool().connection() as conn:
         with conn.cursor() as cur:
@@ -124,7 +128,8 @@ def table_columns(table):
                 "WHERE table_schema='public' AND table_name=%s ORDER BY ordinal_position",
                 (table,))
             cols = [r[0] for r in cur.fetchall()]
-    _cols_cache[table] = cols
+    if cols:                       # only cache a real, non-empty result
+        _cols_cache[table] = cols
     return cols
 
 
@@ -205,6 +210,15 @@ def write_table(tab, user_key, df, columns):
     is_global = table in GLOBAL_TABLES
     real_cols = [c for c in table_columns(table) if c != "id"]   # skip surrogate serial
     write_cols = [c for c in columns if c in real_cols]
+    if not write_cols:
+        # Cache may be stale (table created after an earlier empty lookup). Refresh once.
+        real_cols = [c for c in table_columns(table, refresh=True) if c != "id"]
+        write_cols = [c for c in columns if c in real_cols]
+    if not write_cols:
+        # Fail loudly rather than silently swallowing the row (the old bug).
+        raise RuntimeError(
+            f"table '{table}' has no writable columns matching {columns} — does the table "
+            f"exist? Run the Database schema button (Admin -> Users) to create it.")
 
     # normalise the frame to strings on the columns we will write
     out = df.copy()
