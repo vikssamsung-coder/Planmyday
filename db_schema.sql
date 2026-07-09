@@ -17,6 +17,29 @@ CREATE TABLE IF NOT EXISTS users (
     created_at TEXT,
     PRIMARY KEY (user_key)
 );
+ALTER TABLE users ADD COLUMN IF NOT EXISTS email TEXT;
+
+CREATE TABLE IF NOT EXISTS dump_types (
+    key TEXT,
+    name TEXT,
+    max_files INTEGER,
+    handler TEXT,
+    active TEXT,
+    sort_order INTEGER,
+    updated_at TEXT,
+    PRIMARY KEY (key)
+);
+
+CREATE TABLE IF NOT EXISTS mis_types (
+    key TEXT,
+    name TEXT,
+    params_hint TEXT,
+    handler TEXT,
+    active TEXT,
+    sort_order INTEGER,
+    updated_at TEXT,
+    PRIMARY KEY (key)
+);
 
 CREATE TABLE IF NOT EXISTS team_roster (
     member_id TEXT,

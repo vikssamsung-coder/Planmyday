@@ -6,8 +6,13 @@ but this is the runnable spine — Monthly scorecard -> Start/plan -> Tasks -> U
 
 USERS = [
     "user_key", "name", "role", "department",
-    "login_role", "password", "active", "created_at",
+    "login_role", "password", "active", "created_at", "email",
 ]
+
+DUMP_TYPES = ["key", "name", "max_files", "handler", "active", "sort_order", "updated_at"]
+MIS_TYPES = ["key", "name", "params_hint", "handler", "active", "sort_order", "updated_at"]
+MIS_REQUESTS = ["req_id", "user_key", "mis_key", "mis_name", "params",
+                "requester_email", "status", "created_at"]
 
 # One row per KPI per user per month. achieved_mtd is editable on the Monthly page.
 MONTHLY_TARGETS = [

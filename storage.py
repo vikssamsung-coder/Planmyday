@@ -131,7 +131,7 @@ def local_first():
 #   content      -> CMS updates pushed from the admin
 # (monthly_progress is NOT here: it stays local and is pushed up separately by
 #  sync_daily_progress so the analyst's own views stay fast.)
-NEON_TABLES = {"users_master", "login_log", "content"}
+NEON_TABLES = {"users_master", "login_log", "content", "dump_types", "mis_types"}
 
 
 def _pg_for(path):
@@ -432,11 +432,12 @@ def verify_password(password, stored):
 
 
 def upsert_user(user_key, name, role, password=None, department="", login_role="",
-                active="Yes"):
+                active="Yes", email=None):
     """Create or update a login in the users table (routes to Neon when configured).
       - user_key is lowercased (matches the login input).
       - password: pass a plaintext to (re)set it — it is stored HASHED, never in the clear.
         Pass None/"" to keep the existing password when editing.
+      - email: pass to set/update it; pass None to keep the existing value.
       - role must match a role_prompts/<role>.md file (that decides the coaching prompt),
         or "ADMIN" for a CMS-only admin login.
     Returns (action, user_key) where action is "created" or "updated"."""
@@ -444,6 +445,8 @@ def upsert_user(user_key, name, role, password=None, department="", login_role="
     if not uk:
         raise ValueError("username (user_key) is required")
     df = _read(_users_path(), schemas.USERS)
+    if "email" not in df.columns:
+        df["email"] = ""
     mask = (df["user_key"].astype(str).str.lower() == uk) if not df.empty else None
     exists = mask is not None and mask.any()
 
@@ -454,10 +457,22 @@ def upsert_user(user_key, name, role, password=None, department="", login_role="
     else:
         raise ValueError("a password is required for a new user")
 
+    if email is None:
+        eml = df.loc[mask, "email"].iloc[0] if exists else ""
+    else:
+        eml = str(email).strip()
+
+    def _keep(field, val, default=""):
+        if val is not None:
+            return val
+        return df.loc[mask, field].iloc[0] if exists else default
+
     created_at = df.loc[mask, "created_at"].iloc[0] if exists else _now()
-    row = {"user_key": uk, "name": name or uk, "role": role or "",
-           "department": department or "", "login_role": login_role or "",
-           "password": pw, "active": active or "Yes", "created_at": created_at}
+    row = {"user_key": uk, "name": _keep("name", name, uk),
+           "role": _keep("role", role), "department": _keep("department", department),
+           "login_role": _keep("login_role", login_role or None),
+           "password": pw, "active": active or "Yes", "created_at": created_at,
+           "email": eml}
     if exists:
         i = df[mask].index[0]
         for k, v in row.items():
@@ -468,6 +483,20 @@ def upsert_user(user_key, name, role, password=None, department="", login_role="
         action = "created"
     _write(_users_path(), df, schemas.USERS)
     return action, uk
+
+
+def get_user_email(user_key):
+    """The saved email for a user (from the users table), or '' if none."""
+    try:
+        u = get_user(user_key) or {}
+        return str(u.get("email", "") or "").strip()
+    except Exception:
+        return ""
+
+
+def set_user_email(user_key, email):
+    """Save/update a user's email without touching anything else (type-once, reuse later)."""
+    return upsert_user(user_key, None, None, email=email)
 
 
 def set_user_active(user_key, active):
@@ -512,6 +541,129 @@ def verify_user_in_db(user_key):
         return (not df.empty) and (df["user_key"].astype(str).str.lower() == uk).any()
     except Exception:
         return False
+
+
+def _dump_types_path():
+    return os.path.join(_common_dir(), "dump_types.xlsx")
+
+
+def _mis_types_path():
+    return os.path.join(_common_dir(), "mis_types.xlsx")
+
+
+_DEFAULT_DUMP_TYPES = [
+    {"key": "leadsquared", "name": "LeadSquared Dump", "max_files": 3, "handler": "leadsquared",
+     "active": "Yes", "sort_order": 10},
+    {"key": "partner_master", "name": "Partner Master", "max_files": 1, "handler": "partner_master",
+     "active": "Yes", "sort_order": 20},
+    {"key": "rm_master", "name": "RM Master", "max_files": 1, "handler": "rm_master",
+     "active": "Yes", "sort_order": 30},
+    {"key": "generic", "name": "Generic Dump", "max_files": 3, "handler": "generic",
+     "active": "Yes", "sort_order": 90},
+]
+
+
+def _registry_read(path, cols, defaults):
+    """Read a small registry (dump_types / mis_types) from the backend. Falls back to the
+    built-in defaults if the table is empty or unreachable, so the sender never breaks."""
+    try:
+        df = _read(path, cols)
+    except Exception:
+        df = None
+    import pandas as pd
+    if df is None or df.empty:
+        return [dict(d) for d in defaults]
+    out = []
+    for _, r in df.iterrows():
+        if str(r.get("key", "") or "").strip():
+            out.append({c: r.get(c, "") for c in cols})
+    return out or [dict(d) for d in defaults]
+
+
+def get_dump_types(active_only=True):
+    rows = _registry_read(_dump_types_path(), schemas.DUMP_TYPES, _DEFAULT_DUMP_TYPES)
+    if active_only:
+        rows = [r for r in rows if str(r.get("active", "Yes")).strip().lower() in ("yes", "1", "true", "y", "")]
+    return sorted(rows, key=lambda r: (int(float(r.get("sort_order", 100) or 100)), r.get("name", "")))
+
+
+def get_mis_types(active_only=True):
+    rows = _registry_read(_mis_types_path(), schemas.MIS_TYPES, [])
+    if active_only:
+        rows = [r for r in rows if str(r.get("active", "Yes")).strip().lower() in ("yes", "1", "true", "y", "")]
+    return sorted(rows, key=lambda r: (int(float(r.get("sort_order", 100) or 100)), r.get("name", "")))
+
+
+def _registry_upsert(path, cols, key, fields):
+    import pandas as pd
+    try:
+        df = _read(path, cols)
+    except Exception:
+        df = pd.DataFrame(columns=cols)
+    if "email" in df.columns:
+        pass
+    k = str(key or "").strip().lower()
+    if not k:
+        raise ValueError("key is required")
+    row = {c: fields.get(c, "") for c in cols}
+    row["key"] = k
+    row["updated_at"] = _now()
+    row = {c: ("" if row.get(c) is None else str(row.get(c))) for c in cols}  # store as text
+    mask = (df["key"].astype(str).str.lower() == k) if not df.empty else None
+    if mask is not None and mask.any():
+        i = df[mask].index[0]
+        for c, v in row.items():
+            df.loc[i, c] = v
+        action = "updated"
+    else:
+        df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
+        action = "created"
+    _write(path, df, cols)
+    return action, k
+
+
+def upsert_dump_type(key, name, max_files=1, handler="", active="Yes", sort_order=100):
+    return _registry_upsert(_dump_types_path(), schemas.DUMP_TYPES, key,
+                            {"name": name or key, "max_files": int(max_files or 1),
+                             "handler": handler or key, "active": active or "Yes",
+                             "sort_order": int(sort_order or 100)})
+
+
+def upsert_mis_type(key, name, params_hint="", handler="", active="Yes", sort_order=100):
+    return _registry_upsert(_mis_types_path(), schemas.MIS_TYPES, key,
+                            {"name": name or key, "params_hint": params_hint or "",
+                             "handler": handler or key, "active": active or "Yes",
+                             "sort_order": int(sort_order or 100)})
+
+
+def _mis_requests_path(user_key):
+    return os.path.join(_user_dir(user_key), "mis_requests.xlsx")
+
+
+def log_mis_request(user_key, req_id, mis_key, mis_name, params, requester_email):
+    """Record an MIS request locally so the user sees a 'my requests' history. PMD doesn't
+    track completion — Sarthi emails the finished report straight to the requester."""
+    import pandas as pd
+    try:
+        df = _read(_mis_requests_path(user_key), schemas.MIS_REQUESTS)
+    except Exception:
+        df = pd.DataFrame(columns=schemas.MIS_REQUESTS)
+    row = {"req_id": req_id, "user_key": user_key, "mis_key": mis_key, "mis_name": mis_name,
+           "params": params, "requester_email": requester_email, "status": "requested",
+           "created_at": _now()}
+    df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
+    _write(_mis_requests_path(user_key), df, schemas.MIS_REQUESTS)
+
+
+def get_mis_requests(user_key, limit=25):
+    try:
+        df = _read(_mis_requests_path(user_key), schemas.MIS_REQUESTS)
+    except Exception:
+        return []
+    if df.empty:
+        return []
+    rows = df.to_dict("records")
+    return list(reversed(rows))[:limit]
 
 
 def available_roles():

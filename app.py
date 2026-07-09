@@ -39,6 +39,10 @@ try:
     import reports_engine            # Desktop-only module; may be absent on Cloud
 except Exception:
     reports_engine = None
+try:
+    import dump_sender               # Desktop-only "Update the Dump" (Outlook email)
+except Exception:
+    dump_sender = None
 
 st.set_page_config(page_title="Plan My Day", page_icon="🌅", layout="wide")
 
@@ -2969,33 +2973,70 @@ def team_view(user):
 # ================================================================ shell + header nav
 
 def header_nav(is_lead, partner_ok=True, is_admin=False):
-    """Single-row header tabs across the full content width. Daily log and Communicate are
-    shown only to users allowed the partner-acquisition surfaces. An ADMIN login sees only
-    the Admin module."""
+    """Grouped two-row nav (Option A): a small row of GROUPS that never wraps, and a
+    second row of the selected group's sub-tabs. Returns the selected leaf tab name, so
+    routing in main() is unchanged. Admin logins see only the Admin module."""
     if is_admin:
-        tabs = ["Admin"]
-        icon_map = {"Admin": "shield-lock"}
-    else:
-        tabs = ["Today"]
-        if partner_ok:
-            tabs.append("Daily log")
-        tabs.append("Records")
-        if partner_ok:
-            tabs.append("Communicate")
-        tabs += ["Updates", "Monthly", "Effort", "Projects"]
-        if reports_engine is not None and not storage._on_cloud_host():
-            tabs.append("Reports")          # Reports Engine is a Desktop-only local feature
-        tabs += ["Learning", "History", "Settings"]
-        icon_map = {"Today": "columns-gap", "Daily log": "notebook", "Records": "address-book",
-                    "Communicate": "send", "Updates": "megaphone", "Monthly": "compass",
-                    "Effort": "grid-3x3-gap-fill", "Projects": "kanban", "Reports": "bar-chart",
-                    "Learning": "lightbulb", "History": "history", "Settings": "gear"}
-    icons = [icon_map[t] for t in tabs]
-    if HAVE_OPTION_MENU:
-        return option_menu(
-            None, tabs, icons=icons, orientation="horizontal", default_index=0,
-            styles=style.NAV_STYLES)
-    return st.radio("Navigate", tabs, horizontal=True, label_visibility="collapsed")
+        if HAVE_OPTION_MENU:
+            return option_menu(None, ["Admin"], icons=["shield-lock"],
+                               orientation="horizontal", default_index=0,
+                               styles=style.NAV_STYLES)
+        return "Admin"
+
+    desktop_extra = []
+    if reports_engine is not None and not storage._on_cloud_host():
+        desktop_extra.append(("Reports", "bar-chart"))
+    if dump_sender is not None and not storage._on_cloud_host():
+        desktop_extra.append(("Sarthi", "send"))
+
+    # (group label, group icon, [(tab, icon), ...]) — tabs filtered by permission/availability
+    groups = [
+        ("Plan", "columns-gap",
+            [("Today", "columns-gap")]
+            + ([("Daily log", "notebook")] if partner_ok else [])
+            + [("Updates", "megaphone")]),
+        ("Work", "kanban",
+            [("Records", "address-book")]
+            + ([("Communicate", "send")] if partner_ok else [])
+            + [("Projects", "kanban")]),
+        ("Track", "compass",
+            [("Monthly", "compass"), ("Effort", "grid-3x3-gap-fill"),
+             ("History", "clock-history"), ("Learning", "lightbulb")]),
+        ("Data", "bar-chart", desktop_extra),
+        ("Settings", "gear", [("Settings", "gear")]),
+    ]
+    groups = [(g, ic, tabs) for (g, ic, tabs) in groups if tabs]   # drop empty groups (e.g. Data on Cloud)
+
+    if not HAVE_OPTION_MENU:
+        flat = [t for _, _, tabs in groups for t, _ in tabs]
+        return st.radio("Navigate", flat, horizontal=True, label_visibility="collapsed")
+
+    group_labels = [g for g, _, _ in groups]
+    group_icons = [ic for _, ic, _ in groups]
+    cur_group = st.session_state.get("nav_group", group_labels[0])
+    if cur_group not in group_labels:
+        cur_group = group_labels[0]
+    sel_group = option_menu(
+        None, group_labels, icons=group_icons, orientation="horizontal",
+        default_index=group_labels.index(cur_group), key="nav_group_menu",
+        styles=style.NAV_STYLES)
+    st.session_state["nav_group"] = sel_group
+
+    sub = dict((g, tabs) for g, _, tabs in groups)[sel_group]
+    sub_labels = [t for t, _ in sub]
+    sub_icons = [ic for _, ic in sub]
+    if len(sub_labels) == 1:
+        return sub_labels[0]                      # single-item group (e.g. Settings) — no sub-row
+    key_sub = "nav_sub_" + sel_group
+    cur_sub = st.session_state.get(key_sub, sub_labels[0])
+    if cur_sub not in sub_labels:
+        cur_sub = sub_labels[0]
+    sel_sub = option_menu(
+        None, sub_labels, icons=sub_icons, orientation="horizontal",
+        default_index=sub_labels.index(cur_sub), key="menu_" + key_sub,
+        styles=style.NAV_SUB_STYLES)
+    st.session_state[key_sub] = sel_sub
+    return sel_sub
 
 
 def _maybe_backup(uk):
@@ -3216,6 +3257,8 @@ def _admin_users_panel():
     c = st.columns(2)
     uk_in = c[0].text_input("Username (user_key)", key="au_uk", placeholder="e.g. rinku")
     name_in = c[1].text_input("Display name", key="au_name")
+    email_in = st.text_input("Email (optional — used for MIS report replies)", key="au_email",
+                             placeholder="name@bigul.co")
     # Role options are read live from the repo's role_prompts/ files, so any <role>.md you
     # upload appears here automatically — plus ADMIN and a type-your-own option.
     role_list = storage.available_roles()
@@ -3240,7 +3283,7 @@ def _admin_users_panel():
             try:
                 action, saved = storage.upsert_user(
                     uk_in, name_in, role_in, password=(pw_in or None),
-                    department=dept_in,
+                    department=dept_in, email=(email_in.strip() or None),
                     login_role="admin" if role_in == "ADMIN" else "member")
                 verified = storage.verify_user_in_db(saved)
                 if verified is True:
@@ -3262,6 +3305,21 @@ def _admin_users_panel():
 
     st.divider()
     with st.expander("⚙️ Database schema (Neon)"):
+        try:
+            import db as _dbmod
+            d = _dbmod.diagnostics()
+            good = d["psycopg_imported"] and d["url_present"] and d["enabled"]
+            line = (f"psycopg imported: **{d['psycopg_imported']}** · "
+                    f"NEON_DATABASE_URL present: **{d['url_present']}** · "
+                    f"Neon active: **{d['enabled']}**")
+            (st.success if good else st.error)(line)
+            if not good:
+                st.caption("If Neon active is False, saves go to LOCAL files, not the shared "
+                           "database. psycopg False → the driver didn't install (check logs). "
+                           "URL present False → NEON_DATABASE_URL isn't readable (must be a "
+                           "top-level key in Secrets, not nested). Reboot the app after fixing.")
+        except Exception as _e:
+            st.caption(f"diagnostics unavailable: {_e}")
         st.caption("Create any missing tables in the shared Neon database (e.g. login_log). "
                    "Idempotent and safe to run anytime — it only adds what's missing and "
                    "never touches existing data. Both the cloud and desktop apps use this "
@@ -3272,15 +3330,86 @@ def _admin_users_panel():
             (st.success if ok else st.error)(msg)
 
 
+def _admin_registries_panel():
+    st.markdown("#### Dump types & MIS types")
+    st.caption("These lists drive the Sarthi screen (Send Dump / Request MIS) on every "
+               "machine. Add or edit here — the sender and receiver both read from Neon, so "
+               "a new type appears everywhere. A brand-new type still needs a matching "
+               "handler on the Sarthi (receiver) side to be processed.")
+
+    reg = st.radio("Registry", ["Dump types", "MIS types"], horizontal=True, key="reg_which")
+    is_dump = (reg == "Dump types")
+
+    rows = storage.get_dump_types(active_only=False) if is_dump \
+        else storage.get_mis_types(active_only=False)
+    if rows:
+        hc = st.columns([3, 3, 2, 2])
+        for col, h in zip(hc, ["Name / key", "Handler", "Active", ""]):
+            col.markdown(f"<span style='font-size:12px;font-weight:700;color:#5C6B7A;'>{h}</span>",
+                         unsafe_allow_html=True)
+        for r in rows:
+            k = str(r.get("key", ""))
+            act = str(r.get("active", "Yes")).strip().lower() in ("yes", "true", "1", "y", "")
+            rc = st.columns([3, 3, 2, 2])
+            rc[0].markdown(f"**{r.get('name') or k}**  \n`{k}`")
+            rc[1].markdown(str(r.get("handler", "") or "—"))
+            rc[2].markdown("🟢" if act else "🔴")
+            if rc[3].button("Disable" if act else "Enable", key=f"reg_tog_{reg}_{k}"):
+                new = "No" if act else "Yes"
+                if is_dump:
+                    storage.upsert_dump_type(k, r.get("name"), r.get("max_files", 1),
+                                             r.get("handler"), new, r.get("sort_order", 100))
+                else:
+                    storage.upsert_mis_type(k, r.get("name"), r.get("params_hint", ""),
+                                            r.get("handler"), new, r.get("sort_order", 100))
+                st.rerun()
+
+    st.divider()
+    st.markdown("##### Add or edit")
+    c = st.columns(2)
+    key_in = c[0].text_input("Key (routing id, lowercase)", key="reg_key",
+                             placeholder="e.g. algo_leads")
+    name_in = c[1].text_input("Display name", key="reg_name")
+    c2 = st.columns(2)
+    handler_in = c2[0].text_input("Handler (receiver pipeline)", key="reg_handler",
+                                  placeholder="defaults to key")
+    sort_in = c2[1].number_input("Sort order", 1, 999, 100, 10, key="reg_sort")
+    if is_dump:
+        maxf = st.number_input("Max files", 1, 5, 1, 1, key="reg_maxf")
+    else:
+        hint = st.text_input("Parameters hint (shown to the user)", key="reg_hint",
+                             placeholder="e.g. date range, team")
+    if st.button("Save", type="primary", key="reg_save"):
+        if not key_in.strip():
+            st.error("Key is required.")
+        else:
+            try:
+                if is_dump:
+                    act, k = storage.upsert_dump_type(key_in, name_in, int(maxf),
+                                                      handler_in, "Yes", int(sort_in))
+                else:
+                    act, k = storage.upsert_mis_type(key_in, name_in, hint,
+                                                     handler_in, "Yes", int(sort_in))
+                st.success(f"{reg[:-1]} '{k}' {act}.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Couldn't save: {e}")
+
+
 def admin_view(user):
     if not _is_admin(user):
         st.error("Admins only."); return
     st.markdown("### 🛡️ Admin — content & MIS")
-    tab_pub, tab_manage, tab_mis, tab_users, tab_team, tab_analysis = st.tabs(
-        ["Publish", "Manage", "MIS push", "Users", "Team status", "Analysis"])
+    (tab_pub, tab_manage, tab_mis, tab_users, tab_reg,
+     tab_team, tab_analysis) = st.tabs(
+        ["Publish", "Manage", "MIS push", "Users", "Registries",
+         "Team status", "Analysis"])
 
     with tab_users:
         _admin_users_panel()
+
+    with tab_reg:
+        _admin_registries_panel()
 
     # ---- Publish ----
     with tab_pub:
@@ -3665,6 +3794,14 @@ def main():
     choice = header_nav(is_lead, partner_ok, is_admin)
     st.divider()
 
+    # Desktop: show a banner when a newer build is on GitHub (auto-hides once updated).
+    if not storage._on_cloud_host():
+        try:
+            import updater
+            updater.render_update_banner()
+        except Exception:
+            pass
+
     # Buzzer reminders — checked on EVERY page (not just Today) and across all dates, so a
     # scheduled reminder is never missed because the user was on another tab. Runs after the
     # force-close gate so it doesn't fight that flow.
@@ -3684,6 +3821,8 @@ def main():
      "Settings": settings_view, "Admin": admin_view}
     if reports_engine is not None:
         _routes["Reports"] = reports_engine.reports_view
+    if dump_sender is not None:
+        _routes["Sarthi"] = dump_sender.sarthi_view
     _routes.get(choice, today_view)(user)
 
 

@@ -238,11 +238,23 @@ def busy_button(label, key, working="Working…", icon="⏳", **kwargs):
 # option_menu styles tuned to the theme — import and pass to option_menu(styles=...)
 NAV_STYLES = {
     "container": {"padding": "6px 0", "background-color": "transparent",
-                  "display": "flex", "flex-wrap": "nowrap"},
-    "icon": {"font-size": "0.9rem", "color": "#5C6B7A"},
-    "nav-link": {"font-size": "0.9rem", "font-weight": "600", "color": "#5C6B7A",
-                 "padding": "9px 16px", "margin": "0 3px", "border-radius": "10px",
+                  "display": "flex", "flex-wrap": "nowrap", "overflow-x": "auto"},
+    "icon": {"font-size": "0.8rem", "color": "#5C6B7A"},
+    "nav-link": {"font-size": "0.82rem", "font-weight": "600", "color": "#5C6B7A",
+                 "padding": "7px 10px", "margin": "0 2px", "border-radius": "9px",
                  "white-space": "nowrap", "--hover-color": "#EFEAE2"},
     "nav-link-selected": {"background-color": "#2D4A5E", "color": "white",
                           "font-weight": "700"},
+}
+
+NAV_SUB_STYLES = {
+    "container": {"padding": "2px 0 6px", "background-color": "transparent",
+                  "display": "flex", "flex-wrap": "nowrap", "overflow-x": "auto"},
+    "icon": {"font-size": "0.72rem", "color": "#8A94A0"},
+    "nav-link": {"font-size": "0.78rem", "font-weight": "600", "color": "#8A94A0",
+                 "padding": "5px 10px", "margin": "0 1px", "border-radius": "8px",
+                 "white-space": "nowrap", "--hover-color": "#EFEAE2"},
+    "nav-link-selected": {"background-color": "transparent", "color": "#2D4A5E",
+                          "font-weight": "700", "border-bottom": "2px solid #2D4A5E",
+                          "border-radius": "0"},
 }
