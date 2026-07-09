@@ -12,6 +12,13 @@ import json
 TASK_MODEL = os.environ.get("OPENAI_TASK_MODEL", "gpt-4o-mini")
 ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-6")
 
+# Hard cap on any single AI request. A bare client defaults to a very
+# long timeout (~10 min) with retries, so if the AI endpoint is slow or unreachable (e.g. a
+# firewall/proxy blocking api.openai.com), a call made on the post-login rerun (the daily
+# quote / personalisation brief) hangs and the app looks "stuck on processing" at login.
+# With a bounded timeout + one retry, a bad network fails fast and the caller's fallback runs.
+_AI_TIMEOUT = float(os.environ.get("PMD_AI_TIMEOUT", "25"))
+
 # Approx USD per 1M tokens (input, output). Override via env if pricing changes.
 _PRICING = {
     "gpt-4o-mini": (0.15, 0.60),
@@ -265,7 +272,7 @@ def _chat_json(system, user_obj, max_tokens=1400):
     if os.environ.get("OPENAI_API_KEY"):
         try:
             from openai import OpenAI
-            client = OpenAI()
+            client = OpenAI(timeout=_AI_TIMEOUT, max_retries=1)
             resp = client.chat.completions.create(
                 model=TASK_MODEL,
                 response_format={"type": "json_object"},
@@ -284,7 +291,7 @@ def _chat_json(system, user_obj, max_tokens=1400):
     if os.environ.get("ANTHROPIC_API_KEY"):
         try:
             from anthropic import Anthropic
-            client = Anthropic()
+            client = Anthropic(timeout=_AI_TIMEOUT, max_retries=1)
             msg = client.messages.create(
                 model=ANTHROPIC_MODEL, max_tokens=max_tokens,
                 system=system + "\nReturn ONLY valid JSON, no prose, no markdown.",
@@ -517,7 +524,7 @@ def transcribe(audio_bytes, filename="speech.wav", vocab=""):
         kwargs = {"model": model, "file": buf, "prompt": prompt[:1000]}
         if lang:
             kwargs["language"] = lang
-        return (OpenAI().audio.transcriptions.create(**kwargs).text or "").strip()
+        return (OpenAI(timeout=_AI_TIMEOUT, max_retries=1).audio.transcriptions.create(**kwargs).text or "").strip()
 
     try:
         return _call(TRANSCRIBE_MODEL)
@@ -720,7 +727,7 @@ def broadcast_message(intent, image_bytes=None, media_kind="image", audience="pa
         try:
             import base64
             from openai import OpenAI
-            client = OpenAI()
+            client = OpenAI(timeout=_AI_TIMEOUT, max_retries=1)
             mime = _img_mime(image_bytes)
             b64 = base64.b64encode(image_bytes).decode()
             resp = client.chat.completions.create(
@@ -754,7 +761,7 @@ def broadcast_message(intent, image_bytes=None, media_kind="image", audience="pa
         try:
             import base64
             import anthropic
-            client = anthropic.Anthropic()
+            client = anthropic.Anthropic(timeout=_AI_TIMEOUT, max_retries=1)
             mime = _img_mime(image_bytes)
             b64 = base64.b64encode(image_bytes).decode()
             resp = client.messages.create(
