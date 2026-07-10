@@ -501,10 +501,29 @@ _BASE_VOCAB = ("Bigul, ZipTeam, NeoSapien, Sarthi, demat account, brokerage, sub
                "NSE, BSE, payout, ledger, dealer")
 
 
+def _looks_non_english(text):
+    """True when the transcription came back mostly in a non-Latin script (Urdu/Arabic,
+    Hindi/Devanagari, etc.) — a sign Whisper mis-detected Indian-accented English."""
+    if not text:
+        return False
+    non_latin = 0
+    letters = 0
+    for ch in text:
+        if ch.isalpha():
+            letters += 1
+            o = ord(ch)
+            if (0x0600 <= o <= 0x06FF or 0x0750 <= o <= 0x077F      # Arabic / Urdu
+                    or 0x0900 <= o <= 0x097F                         # Devanagari (Hindi)
+                    or 0x0980 <= o <= 0x0DFF):                       # other Indic scripts
+                non_latin += 1
+    return letters > 0 and (non_latin / letters) > 0.15
+
+
 def transcribe(audio_bytes, filename="speech.wav", vocab=""):
-    """Transcribe recorded audio to text. Returns '' if no key or on error.
-    Passes a language hint and a domain-vocabulary prompt so Indian-English names and broking
-    jargon are spelled correctly instead of guessed phonetically."""
+    """Transcribe recorded audio to ENGLISH text. Returns '' if no key or on error.
+    Pins the language to English and, if the model still returns a non-Latin script
+    (accented English is sometimes mis-detected as Urdu/Hindi), falls back to the
+    whisper-1 translations endpoint, which always outputs English."""
     if not have_key() or not audio_bytes:
         return ""
     prompt = _BASE_VOCAB + ((", " + vocab) if vocab else "")
@@ -519,13 +538,31 @@ def transcribe(audio_bytes, filename="speech.wav", vocab=""):
             kwargs["language"] = lang
         return (OpenAI().audio.transcriptions.create(**kwargs).text or "").strip()
 
+    def _translate_to_english():
+        # whisper-1 translations ALWAYS returns English regardless of spoken language.
+        import io
+        from openai import OpenAI
+        buf = io.BytesIO(audio_bytes); buf.name = filename
+        return (OpenAI().audio.translations.create(
+            model="whisper-1", file=buf, prompt=prompt[:1000]).text or "").strip()
+
     try:
-        return _call(TRANSCRIBE_MODEL)
+        out = _call(TRANSCRIBE_MODEL)
     except Exception:
         try:
-            return _call("whisper-1")
+            out = _call("whisper-1")
         except Exception:
-            return ""
+            out = ""
+
+    # If it came back in Urdu/Hindi script, force English via the translations endpoint.
+    if _looks_non_english(out):
+        try:
+            eng = _translate_to_english()
+            if eng and not _looks_non_english(eng):
+                return eng
+        except Exception:
+            pass
+    return out
 
 
 MEETING_SYSTEM = """You turn a messy post-meeting voice note into a clean, structured

@@ -2062,6 +2062,32 @@ def _voice_vocab():
         return ""
 
 
+def _working(label="Working…"):
+    """Context manager showing a small green spinning-clock 'in progress' indicator while a
+    slow step (transcribe, AI, send) runs. Clears itself when the block finishes."""
+    from contextlib import contextmanager
+
+    @contextmanager
+    def _cm():
+        ph = st.empty()
+        ph.markdown(
+            "<div style='display:flex;align-items:center;gap:9px;padding:4px 0;'>"
+            "<span class='pmd-ring'></span>"
+            f"<span style='color:#1B7F4B;font-weight:600;font-size:0.9rem;'>{label}</span>"
+            "</div>"
+            "<style>@keyframes pmdspin{to{transform:rotate(360deg)}}"
+            ".pmd-ring{width:16px;height:16px;border:2.5px solid #B7E4C7;"
+            "border-top-color:#1B7F4B;border-radius:50%;display:inline-block;"
+            "animation:pmdspin .8s linear infinite;}</style>",
+            unsafe_allow_html=True)
+        try:
+            yield
+        finally:
+            ph.empty()
+
+    return _cm()
+
+
 def _dictate_bytes(key, label):
     """Capture mic audio robustly across environments.
 
@@ -2075,6 +2101,14 @@ def _dictate_bytes(key, label):
     """
     audio_bytes = None
     if hasattr(st, "audio_input"):
+        if not st.session_state.get("_dictate_css"):
+            st.markdown(
+                "<style>"
+                "[data-testid='stAudioInput']{max-width:340px;}"
+                "[data-testid='stAudioInput'] label{font-size:0.85rem;font-weight:600;"
+                "color:#2D4A5E;}"
+                "</style>", unsafe_allow_html=True)
+            st.session_state["_dictate_css"] = True
         clip = st.audio_input(label, key=f"ai_{key}")
         if clip is not None:
             audio_bytes = clip.getvalue()
@@ -2104,7 +2138,7 @@ def _dictate_text(key, label):
     b = _dictate_bytes(key, label)
     if not b:
         return ""
-    with st.spinner("Transcribing…"):
+    with _working("Transcribing…"):
         return ai.transcribe(b, vocab=_voice_vocab()) or ""
 
 
