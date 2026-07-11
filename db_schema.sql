@@ -41,6 +41,19 @@ CREATE TABLE IF NOT EXISTS mis_types (
     PRIMARY KEY (key)
 );
 
+CREATE TABLE IF NOT EXISTS report_requests (
+    req_id TEXT,
+    user_key TEXT,
+    requester_email TEXT,
+    report_key TEXT,
+    report_name TEXT,
+    params TEXT,
+    source TEXT,
+    status TEXT,
+    created_at TEXT,
+    PRIMARY KEY (req_id)
+);
+
 CREATE TABLE IF NOT EXISTS team_roster (
     member_id TEXT,
     name TEXT,

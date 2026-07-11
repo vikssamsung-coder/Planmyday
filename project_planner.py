@@ -54,13 +54,13 @@ def _pctf(v):
 
 
 def _days_left(end, today):
-    return (end - today).days if end else None
+    return (end - today).days if isinstance(end, date) else None
 
 
 def _health(status, end, percent, today):
     if str(status or "").strip().lower() == "done" or _pctf(percent) >= 100:
         return "Done"
-    if end is None:
+    if not isinstance(end, date):
         return "No date"
     if end < today:
         return "Overdue"
@@ -206,14 +206,19 @@ def _render_board(df, today):
     heads = ["Sub-Task", "Owner", "Priority", "Status", "Start", "End", "%", "Days Left", "Health", "Notes / Dependencies"]
     html.append("<tr>" + "".join(f'<td style="{hd}">{h}</td>' for h in heads) + "</tr>")
 
-    for project in list(dict.fromkeys(d["project"].tolist())):
-        g = d[d["project"] == project]
+    if "heading" not in d.columns:
+        d["heading"] = ""
+    d["heading"] = d["heading"].fillna("")
+    pairs = list(dict.fromkeys(zip(d["heading"].tolist(), d["project"].tolist())))
+    for heading, project in pairs:
+        g = d[(d["heading"] == heading) & (d["project"] == project)]
         avg = round(g["percent"].map(_pctf).mean()) if len(g) else 0
         od = int((g["_health"] == "Overdue").sum())
         roll = (f" · <span style='color:#C0392B;'>{od} overdue</span>" if od else "")
+        label = f"{heading} › {project}" if heading else (project or "—")
         html.append(
             f'<tr><td colspan="10" style="padding:12px 10px 6px;font-size:14px;font-weight:800;'
-            f'color:#1B2733;">🗂️ {project or "—"} '
+            f'color:#1B2733;">🗂️ {label} '
             f'<span style="font-weight:500;color:#5C6B7A;font-size:12px;">· {len(g)} sub-tasks · '
             f'{avg}% avg{roll}</span></td></tr>')
         for _, r in g.iterrows():
@@ -230,7 +235,7 @@ def _render_board(df, today):
             pri = str(r["priority"] or "").strip().upper()
             pri_c = PRIORITY_COLORS.get(pri, "#8A94A0")
             def _dfmt(dt):
-                return dt.strftime("%d-%b-%y") if dt else "—"
+                return dt.strftime("%d-%b-%y") if isinstance(dt, date) else "—"
             title_style = "text-decoration:line-through;color:#9AA6B2;" if hl == "Done" else "color:#1B2733;font-weight:600;"
             html.append("<tr>")
             html.append(f'<td style="{base}{title_style}">{r["subtask"] or "—"}</td>')
@@ -275,7 +280,7 @@ def _campaigns(uk, df, today):
 
     with st.expander("✏️ Edit plan (add rows at the bottom · tick to delete · then Save)",
                      expanded=df.empty):
-        edit_cols = ["row_id", "project", "subtask", "owner", "priority", "status",
+        edit_cols = ["row_id", "heading", "project", "subtask", "owner", "priority", "status",
                      "start_date", "end_date", "percent", "notes"]
         if df.empty:
             ed = pd.DataFrame(columns=edit_cols)
@@ -289,6 +294,7 @@ def _campaigns(uk, df, today):
             ed, num_rows="dynamic", use_container_width=True, key="proj_editor",
             column_config={
                 "row_id": None,
+                "heading": st.column_config.TextColumn("Heading", width="medium"),
                 "project": st.column_config.TextColumn("Main Task", width="medium"),
                 "subtask": st.column_config.TextColumn("Sub-Task", width="large"),
                 "owner": st.column_config.TextColumn("Owner"),
@@ -316,14 +322,16 @@ def _campaigns(uk, df, today):
             for i, r in edited.reset_index(drop=True).iterrows():
                 proj = str(r.get("project") or "").strip()
                 sub = str(r.get("subtask") or "").strip()
-                if not proj and not sub:
+                head = str(r.get("heading") or "").strip()
+                if not proj and not sub and not head:
                     continue
                 rid = str(r.get("row_id") or "").strip()
                 if not rid or rid.lower() == "nan" or rid in seen:
                     rid = "pt_" + _uuid.uuid4().hex[:10]
                 seen.add(rid)
                 rows.append({
-                    "row_id": rid, "user_key": uk, "project": proj, "subtask": sub,
+                    "row_id": rid, "user_key": uk, "heading": head,
+                    "project": proj, "subtask": sub,
                     "owner": str(r.get("owner") or "").strip(),
                     "priority": str(r.get("priority") or "").strip(),
                     "status": str(r.get("status") or "").strip(),
@@ -340,6 +348,94 @@ def _campaigns(uk, df, today):
             storage.save_project_tasks(uk, ndf)
             st.success(f"Saved {len(rows)} sub-task(s).")
             st.rerun()
+
+    with st.expander("📤 Upload from Excel"):
+        st.caption("Upload an .xlsx with columns: Heading, Main Task, Sub-Task, Owner, "
+                   "Priority, Status, Start, End, % Complete, Notes. Download the format, "
+                   "fill it, and upload. Dates as YYYY-MM-DD or DD-MMM-YY.")
+        st.download_button("⬇️ Download Excel format", data=_template_bytes(),
+                           file_name="PMD_project_upload_format.xlsx", key="proj_tmpl",
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        up = st.file_uploader("Upload filled Excel", type=["xlsx", "xls"], key="proj_upload")
+        mode = st.radio("Import mode", ["Append to plan", "Replace plan"],
+                        horizontal=True, key="proj_up_mode")
+        if up is not None and st.button("Import from Excel", type="primary", key="proj_import"):
+            try:
+                added = _import_excel(uk, up, replace=(mode == "Replace plan"))
+                st.success(f"Imported {added} row(s) from Excel.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Couldn't import: {e}")
+
+
+def _template_bytes():
+    """A ready-to-fill Excel template with the expected headers + one example row."""
+    import io
+    cols = ["Heading", "Main Task", "Sub-Task", "Owner", "Priority", "Status",
+            "Start", "End", "% Complete", "Notes"]
+    example = [["Q3 Brand Refresh", "Website revamp", "Design new homepage", "Amish", "P1",
+                "Not Started", "2026-08-01", "2026-08-15", 0, "depends on copy"],
+               ["Q3 Brand Refresh", "Website revamp", "Write homepage copy", "Ketki", "P2",
+                "In Progress", "2026-08-01", "2026-08-10", 40, ""]]
+    df = pd.DataFrame(example, columns=cols)
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as w:
+        df.to_excel(w, index=False, sheet_name="Plan")
+    return buf.getvalue()
+
+
+def _import_excel(uk, file, replace=False):
+    """Read an uploaded Excel plan and append/replace the user's project tasks.
+    Column matching is case-insensitive and tolerant of common header variants."""
+    import uuid as _uuid
+    raw = pd.read_excel(file)
+    norm = {str(c).strip().lower(): c for c in raw.columns}
+
+    def col(*names):
+        for n in names:
+            if n in norm:
+                return norm[n]
+        return None
+
+    c_head = col("heading")
+    c_main = col("main task", "main_task", "project", "campaign", "maintask")
+    c_sub = col("sub-task", "sub task", "subtask", "task")
+    c_owner = col("owner")
+    c_pri = col("priority")
+    c_stat = col("status")
+    c_start = col("start", "start date", "start_date")
+    c_end = col("end", "end date", "end_date")
+    c_pct = col("% complete", "percent", "% complete ", "progress", "%")
+    c_notes = col("notes", "notes / dependencies", "dependencies")
+
+    def g(r, c):
+        return "" if c is None else str(r.get(c, "") or "").strip()
+
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    existing = [] if replace else storage.get_project_tasks(uk).to_dict("records")
+    rows = list(existing)
+    base = len(existing)
+    added = 0
+    for i, r in raw.iterrows():
+        head, main, sub = g(r, c_head), g(r, c_main), g(r, c_sub)
+        if not head and not main and not sub:
+            continue
+        sd = _parse_date(g(r, c_start))
+        ed = _parse_date(g(r, c_end))
+        rows.append({
+            "row_id": "pt_" + _uuid.uuid4().hex[:10], "user_key": uk,
+            "heading": head, "project": main, "subtask": sub,
+            "owner": g(r, c_owner), "priority": g(r, c_pri) or "P2",
+            "status": g(r, c_stat) or "Not Started",
+            "start_date": sd.strftime("%Y-%m-%d") if sd else "",
+            "end_date": ed.strftime("%Y-%m-%d") if ed else "",
+            "percent": str(_pctf(r.get(c_pct) if c_pct else 0)),
+            "notes": g(r, c_notes), "sort_order": str(base + added),
+            "created_at": now, "updated_at": now})
+        added += 1
+    ndf = pd.DataFrame(rows, columns=schemas.PROJECT_TASKS)
+    storage.save_project_tasks(uk, ndf)
+    return added
 
 
 # ======================================================================= TAB: Calendar

@@ -113,6 +113,7 @@ TAB_TO_TABLE = {
     "users_master": "users",
     "dump_types": "dump_types",
     "mis_types": "mis_types",
+    "report_requests": "report_requests",
 }
 
 # Tables that are GLOBAL/shared (no user_key filter): everyone reads/writes all rows.

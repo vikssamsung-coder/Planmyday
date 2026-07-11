@@ -14,6 +14,12 @@ MIS_TYPES = ["key", "name", "params_hint", "handler", "active", "sort_order", "u
 MIS_REQUESTS = ["req_id", "user_key", "mis_key", "mis_name", "params",
                 "requester_email", "status", "created_at"]
 
+MIND_MAPS = ["map_id", "user_key", "name", "created_at", "updated_at"]
+MIND_NODES = ["node_id", "map_id", "user_key", "parent_id", "text", "sort_order", "created_at"]
+
+REPORT_REQUESTS = ["req_id", "user_key", "requester_email", "report_key", "report_name",
+                   "params", "source", "status", "created_at"]
+
 # One row per KPI per user per month. achieved_mtd is editable on the Monthly page.
 MONTHLY_TARGETS = [
     "month", "user_key", "role", "kpi_name",
@@ -213,7 +219,7 @@ LEARNINGS_DIGEST = ["user_key", "brief", "source_count", "updated_at"]
 # Project Planner — main task + sub-task rows (per-user). Days-left & health are COMPUTED
 # from end_date/status/percent at render time, so they are not stored.
 PROJECT_TASKS = [
-    "row_id", "user_key", "project", "subtask", "owner", "priority", "status",
+    "row_id", "user_key", "heading", "project", "subtask", "owner", "priority", "status",
     "start_date", "end_date", "percent", "notes", "sort_order",
     "created_at", "updated_at",
 ]

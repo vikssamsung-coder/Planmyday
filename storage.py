@@ -131,7 +131,8 @@ def local_first():
 #   content      -> CMS updates pushed from the admin
 # (monthly_progress is NOT here: it stays local and is pushed up separately by
 #  sync_daily_progress so the analyst's own views stay fast.)
-NEON_TABLES = {"users_master", "login_log", "content", "dump_types", "mis_types"}
+NEON_TABLES = {"users_master", "login_log", "content", "dump_types", "mis_types",
+               "report_requests"}
 
 
 def _pg_for(path):
@@ -664,6 +665,149 @@ def get_mis_requests(user_key, limit=25):
         return []
     rows = df.to_dict("records")
     return list(reversed(rows))[:limit]
+
+
+def _mind_maps_path(user_key):
+    return os.path.join(_user_dir(user_key), "mind_maps.xlsx")
+
+
+def _mind_nodes_path(user_key):
+    return os.path.join(_user_dir(user_key), "mind_nodes.xlsx")
+
+
+def get_mind_maps(user_key):
+    try:
+        df = _read(_mind_maps_path(user_key), schemas.MIND_MAPS)
+    except Exception:
+        import pandas as pd
+        df = pd.DataFrame(columns=schemas.MIND_MAPS)
+    return df
+
+
+def create_mind_map(user_key, name):
+    import uuid as _uuid
+    import pandas as pd
+    df = get_mind_maps(user_key)
+    mid = "mm_" + _uuid.uuid4().hex[:10]
+    row = {"map_id": mid, "user_key": user_key, "name": name or "Untitled map",
+           "created_at": _now(), "updated_at": _now()}
+    df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
+    _write(_mind_maps_path(user_key), df, schemas.MIND_MAPS)
+    return mid
+
+
+def rename_mind_map(user_key, map_id, name):
+    df = get_mind_maps(user_key)
+    if df.empty:
+        return
+    m = df["map_id"].astype(str) == str(map_id)
+    if m.any():
+        df.loc[m, "name"] = name
+        df.loc[m, "updated_at"] = _now()
+        _write(_mind_maps_path(user_key), df, schemas.MIND_MAPS)
+
+
+def delete_mind_map(user_key, map_id):
+    df = get_mind_maps(user_key)
+    if not df.empty:
+        df = df[df["map_id"].astype(str) != str(map_id)]
+        _write(_mind_maps_path(user_key), df, schemas.MIND_MAPS)
+    nodes = _read(_mind_nodes_path(user_key), schemas.MIND_NODES)
+    if not nodes.empty:
+        nodes = nodes[nodes["map_id"].astype(str) != str(map_id)]
+        _write(_mind_nodes_path(user_key), nodes, schemas.MIND_NODES)
+
+
+def get_mind_nodes(user_key, map_id):
+    try:
+        df = _read(_mind_nodes_path(user_key), schemas.MIND_NODES)
+    except Exception:
+        return []
+    if df.empty:
+        return []
+    df = df[df["map_id"].astype(str) == str(map_id)]
+    return df.to_dict("records")
+
+
+def _save_mind_nodes(user_key, map_id, rows):
+    import pandas as pd
+    alln = _read(_mind_nodes_path(user_key), schemas.MIND_NODES)
+    if not alln.empty:
+        alln = alln[alln["map_id"].astype(str) != str(map_id)]      # drop this map's rows
+    new = pd.DataFrame(rows, columns=schemas.MIND_NODES) if rows else pd.DataFrame(columns=schemas.MIND_NODES)
+    out = pd.concat([alln, new], ignore_index=True)
+    _write(_mind_nodes_path(user_key), out, schemas.MIND_NODES)
+
+
+def add_mind_node(user_key, map_id, text, parent_id=""):
+    import uuid as _uuid
+    rows = get_mind_nodes(user_key, map_id)
+    nid = "nd_" + _uuid.uuid4().hex[:10]
+    rows.append({"node_id": nid, "map_id": map_id, "user_key": user_key,
+                 "parent_id": parent_id or "", "text": text or "Untitled",
+                 "sort_order": str(len(rows)), "created_at": _now()})
+    _save_mind_nodes(user_key, map_id, rows)
+    return nid
+
+
+def update_mind_node(user_key, map_id, node_id, text=None, parent_id=None):
+    rows = get_mind_nodes(user_key, map_id)
+    for r in rows:
+        if str(r.get("node_id")) == str(node_id):
+            if text is not None:
+                r["text"] = text
+            if parent_id is not None:
+                r["parent_id"] = parent_id
+    _save_mind_nodes(user_key, map_id, rows)
+
+
+def delete_mind_node(user_key, map_id, node_id):
+    """Delete a node and its whole subtree (descendants)."""
+    rows = get_mind_nodes(user_key, map_id)
+    kids = {}
+    for r in rows:
+        kids.setdefault(str(r.get("parent_id") or ""), []).append(str(r.get("node_id")))
+    doomed = set()
+    stack = [str(node_id)]
+    while stack:
+        cur = stack.pop()
+        doomed.add(cur)
+        stack.extend(kids.get(cur, []))
+    rows = [r for r in rows if str(r.get("node_id")) not in doomed]
+    _save_mind_nodes(user_key, map_id, rows)
+
+
+def _report_requests_path(user_key):
+    return os.path.join(_user_dir(user_key), "report_requests.xlsx")
+
+
+def submit_report_request(user_key, report_key, report_name, params, requester_email,
+                          source="desktop"):
+    """Save a report request to Neon (shared) so it works from cloud AND desktop, and the
+    Sarthi receiver can read it and trigger the report. Returns the req_id."""
+    import uuid as _uuid
+    import pandas as pd
+    try:
+        df = _read(_report_requests_path(user_key), schemas.REPORT_REQUESTS)
+    except Exception:
+        df = pd.DataFrame(columns=schemas.REPORT_REQUESTS)
+    rid = "rr_" + _uuid.uuid4().hex[:10]
+    row = {"req_id": rid, "user_key": user_key, "requester_email": requester_email or "",
+           "report_key": report_key, "report_name": report_name, "params": params or "",
+           "source": source, "status": "requested", "created_at": _now()}
+    df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
+    _write(_report_requests_path(user_key), df, schemas.REPORT_REQUESTS)
+    return rid
+
+
+def get_report_requests(user_key, limit=25):
+    try:
+        df = _read(_report_requests_path(user_key), schemas.REPORT_REQUESTS)
+    except Exception:
+        return []
+    if df.empty:
+        return []
+    return list(reversed(df.to_dict("records")))[:limit]
 
 
 def available_roles():
