@@ -114,10 +114,13 @@ TAB_TO_TABLE = {
     "dump_types": "dump_types",
     "mis_types": "mis_types",
     "report_requests": "report_requests",
+    "mis_reports": "mis_reports",
+    "mis_report_access": "mis_report_access",
 }
 
 # Tables that are GLOBAL/shared (no user_key filter): everyone reads/writes all rows.
-GLOBAL_TABLES = {"users", "team_roster", "content", "dump_types", "mis_types"}
+GLOBAL_TABLES = {"users", "team_roster", "content", "dump_types", "mis_types",
+                 "mis_reports", "mis_report_access"}
 
 # Cache of each table's real columns (so we only write columns that exist, and ignore
 # surrogate auto-id columns like task_log.id on insert). Filled on first use per table.

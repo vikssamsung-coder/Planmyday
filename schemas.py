@@ -20,6 +20,10 @@ MIND_NODES = ["node_id", "map_id", "user_key", "parent_id", "text", "sort_order"
 REPORT_REQUESTS = ["req_id", "user_key", "requester_email", "report_key", "report_name",
                    "params", "source", "status", "created_at"]
 
+MIS_REPORTS = ["report_key", "mis_key", "name", "description", "source_url", "file_name",
+               "active", "sort_order", "source_modified_at", "last_checked_at", "updated_at"]
+MIS_REPORT_ACCESS = ["report_key", "principal_type", "principal"]
+
 # One row per KPI per user per month. achieved_mtd is editable on the Monthly page.
 MONTHLY_TARGETS = [
     "month", "user_key", "role", "kpi_name",

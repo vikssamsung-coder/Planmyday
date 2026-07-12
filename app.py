@@ -47,6 +47,10 @@ try:
     import mindmap                   # Mind Map (Level 1 auto-layout)
 except Exception:
     mindmap = None
+try:
+    import mis_reports               # MIS & Reports (download list; cloud + desktop)
+except Exception:
+    mis_reports = None
 
 st.set_page_config(page_title="Plan My Day", page_icon="🌅", layout="wide")
 
@@ -3022,8 +3026,8 @@ def header_nav(is_lead, partner_ok=True, is_admin=False):
         return "Admin"
 
     desktop_extra = []
-    if reports_engine is not None and not storage._on_cloud_host():
-        desktop_extra.append(("Reports", "bar-chart"))
+    if mis_reports is not None:
+        desktop_extra.append(("MIS & Reports", "file-earmark-arrow-down"))   # both platforms
     if dump_sender is not None:
         desktop_extra.append(("Sarthi", "send"))     # both platforms; Send Dumps is desktop-gated inside
 
@@ -3371,6 +3375,139 @@ def _admin_users_panel():
             (st.success if ok else st.error)(msg)
 
 
+def _admin_mis_reports_panel():
+    st.markdown("#### MIS Reports")
+    st.caption("Define a downloadable report (name + share link) and choose who can see it. "
+               "The link must be shared as “Anyone with the link can view”. Admins always "
+               "see every report.")
+    try:
+        import mis_reports as _mr
+    except Exception as e:
+        st.error(f"MIS reports module unavailable: {e}")
+        return
+
+    rows = storage.list_mis_reports(active_only=False)
+    if rows:
+        hc = st.columns([3, 3, 2, 2])
+        for col, h in zip(hc, ["Report", "Last updated", "Active", ""]):
+            col.markdown(f"<span style='font-size:12px;font-weight:700;color:#5C6B7A;'>{h}</span>",
+                         unsafe_allow_html=True)
+        for r in rows:
+            rk = r["report_key"]
+            act = str(r.get("active", "true")).lower() in ("true", "yes", "1", "y", "")
+            rc = st.columns([3, 3, 2, 2])
+            rc[0].markdown(f"**{r.get('name', rk)}**  \n`{rk}`")
+            rc[1].markdown(_mr._fmt_updated(r.get("source_modified_at")))
+            rc[2].markdown("🟢" if act else "🔴")
+            if rc[3].button("Delete", key=f"mrz_del_{rk}"):
+                storage.delete_mis_report(rk)
+                st.rerun()
+
+    st.divider()
+    st.markdown("##### Add or edit a report")
+    keys = [""] + [r["report_key"] for r in rows]
+    editing = st.selectbox("Edit existing (or leave blank to create new)", keys,
+                           format_func=lambda k: k or "— new report —", key="mrz_edit")
+    cur = storage.get_mis_report(editing) if editing else {}
+
+    c = st.columns(2)
+    rk_in = c[0].text_input("report_key (slug — cannot change later)",
+                            value=cur.get("report_key", ""), key="mrz_key",
+                            disabled=bool(editing), placeholder="daily_business_mis")
+    name_in = c[1].text_input("Name", value=cur.get("name", ""), key="mrz_name")
+    desc_in = st.text_input("Description (optional)", value=cur.get("description", ""),
+                            key="mrz_desc")
+    url_in = st.text_input("Share link (SharePoint / OneDrive)",
+                           value=cur.get("source_url", ""), key="mrz_url")
+    st.caption("Must be shared as “Anyone with the link can view”.")
+
+    mts = storage.get_mis_types(active_only=False)
+    gopts = [""] + [t["key"] for t in mts]
+    gnames = {t["key"]: t["name"] for t in mts}
+    c2 = st.columns(3)
+    grp = c2[0].selectbox("Group (MIS type, optional)", gopts,
+                          index=gopts.index(cur.get("mis_key", "")) if cur.get("mis_key", "") in gopts else 0,
+                          format_func=lambda k: gnames.get(k, k) or "— none —", key="mrz_grp")
+    fname = c2[1].text_input("File name override (optional)", value=cur.get("file_name", ""),
+                             key="mrz_fname")
+    try:
+        so_val = int(float(cur.get("sort_order", 100) or 100))
+    except Exception:
+        so_val = 100
+    sort_in = c2[2].number_input("Sort order", 1, 999, so_val, 10, key="mrz_sort")
+    active_in = st.checkbox("Active (visible to users)",
+                            value=str(cur.get("active", "true")).lower() in
+                            ("true", "yes", "1", "y", ""), key="mrz_active")
+
+    cb = st.columns(2)
+    if cb[0].button("🔗 Test link", key="mrz_test"):
+        if not url_in.strip():
+            st.error("Paste the share link first.")
+        else:
+            with st.spinner("Fetching…"):
+                try:
+                    data, srv_name, _mime = _mr.fetch_report(url_in.strip())
+                    ts = _mr.fetch_last_modified(url_in.strip())
+                    st.success(f"Link works — {len(data):,} bytes · file “{srv_name}”"
+                               + (f" · modified {ts}" if ts else " · no modified time reported"))
+                except Exception as e:
+                    st.error(f"Couldn't fetch: {e}. Check the link is shared as "
+                             "“Anyone with the link can view”.")
+
+    if cb[1].button("Save report", type="primary", key="mrz_save"):
+        key_final = (editing or rk_in).strip()
+        if not key_final or not name_in.strip() or not url_in.strip():
+            st.error("report_key, Name and Share link are required.")
+        else:
+            try:
+                act, saved = storage.save_mis_report(
+                    key_final, name_in.strip(), url_in.strip(),
+                    description=desc_in.strip(), mis_key=grp,
+                    file_name=fname.strip(),
+                    active=("true" if active_in else "false"), sort_order=int(sort_in))
+                _mr.refresh_last_modified(saved, url_in.strip())
+                st.success(f"Report '{saved}' {act}.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Couldn't save: {e}")
+
+    if editing:
+        st.divider()
+        st.markdown(f"##### Who can see “{cur.get('name', editing)}”")
+        st.caption("No rules = admin-only (deny by default). Admins always see every report.")
+        acc = storage.get_report_access(editing)
+        has_all = any(str(a.get("principal_type", "")).lower() == "all" for a in acc)
+        cur_roles = [a["principal"] for a in acc
+                     if str(a.get("principal_type", "")).lower() == "role"]
+        cur_users = [a["principal"] for a in acc
+                     if str(a.get("principal_type", "")).lower() == "user"]
+
+        everyone = st.checkbox("Visible to everyone", value=has_all, key="mrz_all")
+        udf = storage.get_users()
+        all_roles = sorted({str(r) for r in udf.get("role", []) if str(r).strip()} |
+                           {str(r) for r in udf.get("login_role", []) if str(r).strip()}) \
+            if not udf.empty else []
+        all_users = sorted(udf["user_key"].astype(str).tolist()) if not udf.empty else []
+        unames = dict(zip(udf["user_key"].astype(str), udf["name"].astype(str))) \
+            if not udf.empty else {}
+
+        sel_roles, sel_users = [], []
+        if not everyone:
+            sel_roles = st.multiselect("Roles", all_roles,
+                                       default=[r for r in cur_roles if r in all_roles],
+                                       key="mrz_roles")
+            sel_users = st.multiselect("People", all_users,
+                                       default=[u for u in cur_users if u in all_users],
+                                       format_func=lambda u: unames.get(u, u),
+                                       key="mrz_users")
+        if st.button("Save visibility", key="mrz_vis"):
+            rules = [("all", "*")] if everyone else (
+                [("role", r) for r in sel_roles] + [("user", u) for u in sel_users])
+            storage.set_report_access(editing, rules)
+            st.success("Visibility updated.")
+            st.rerun()
+
+
 def _admin_registries_panel():
     st.markdown("#### Dump types & MIS types")
     st.caption("These lists drive the Sarthi screen (Send Dump / Request MIS) on every "
@@ -3441,10 +3578,13 @@ def admin_view(user):
     if not _is_admin(user):
         st.error("Admins only."); return
     st.markdown("### 🛡️ Admin — content & MIS")
-    (tab_pub, tab_manage, tab_mis, tab_users, tab_reg,
+    (tab_pub, tab_manage, tab_mis, tab_users, tab_reg, tab_mrep,
      tab_team, tab_analysis) = st.tabs(
-        ["Publish", "Manage", "MIS push", "Users", "Registries",
+        ["Publish", "Manage", "MIS push", "Users", "Registries", "MIS Reports",
          "Team status", "Analysis"])
+
+    with tab_mrep:
+        _admin_mis_reports_panel()
 
     with tab_users:
         _admin_users_panel()
@@ -3860,8 +4000,8 @@ def main():
      "Effort": effort_view, "Projects": project_planner.project_view,
      "Learning": learning_view, "History": history_view,
      "Settings": settings_view, "Admin": admin_view}
-    if reports_engine is not None:
-        _routes["Reports"] = reports_engine.reports_view
+    if mis_reports is not None:
+        _routes["MIS & Reports"] = mis_reports.mis_reports_view
     if dump_sender is not None:
         _routes["Sarthi"] = dump_sender.sarthi_view
     if mindmap is not None:

@@ -132,7 +132,7 @@ def local_first():
 # (monthly_progress is NOT here: it stays local and is pushed up separately by
 #  sync_daily_progress so the analyst's own views stay fast.)
 NEON_TABLES = {"users_master", "login_log", "content", "dump_types", "mis_types",
-               "report_requests"}
+               "report_requests", "mis_reports", "mis_report_access"}
 
 
 def _pg_for(path):
@@ -808,6 +808,169 @@ def get_report_requests(user_key, limit=25):
     if df.empty:
         return []
     return list(reversed(df.to_dict("records")))[:limit]
+
+
+def _mis_reports_path():
+    return os.path.join(_common_dir(), "mis_reports.xlsx")
+
+
+def _mis_report_access_path():
+    return os.path.join(_common_dir(), "mis_report_access.xlsx")
+
+
+def list_mis_reports(active_only=False):
+    """All defined reports, ordered by sort_order then name."""
+    import pandas as pd
+    try:
+        df = _read(_mis_reports_path(), schemas.MIS_REPORTS)
+    except Exception:
+        df = pd.DataFrame(columns=schemas.MIS_REPORTS)
+    if df.empty:
+        return []
+    rows = [r for r in df.to_dict("records") if str(r.get("report_key", "") or "").strip()]
+    if active_only:
+        rows = [r for r in rows
+                if str(r.get("active", "true")).strip().lower() in ("true", "yes", "1", "y", "")]
+
+    def _k(r):
+        try:
+            so = int(float(r.get("sort_order", 100) or 100))
+        except Exception:
+            so = 100
+        return (so, str(r.get("name", "")))
+    return sorted(rows, key=_k)
+
+
+def get_mis_report(report_key):
+    for r in list_mis_reports():
+        if str(r.get("report_key")) == str(report_key):
+            return r
+    return None
+
+
+def save_mis_report(report_key, name, source_url, description="", mis_key="", file_name="",
+                    active="true", sort_order=100, source_modified_at=None,
+                    last_checked_at=None):
+    """Create or update a report definition. report_key is the immutable slug."""
+    import pandas as pd
+    rk = str(report_key or "").strip().lower().replace(" ", "_")
+    if not rk:
+        raise ValueError("report_key is required")
+    try:
+        df = _read(_mis_reports_path(), schemas.MIS_REPORTS)
+    except Exception:
+        df = pd.DataFrame(columns=schemas.MIS_REPORTS)
+    prev = get_mis_report(rk) or {}
+    row = {
+        "report_key": rk, "mis_key": mis_key or "", "name": name or rk,
+        "description": description or "", "source_url": source_url or "",
+        "file_name": file_name or "", "active": str(active).lower(),
+        "sort_order": str(int(sort_order or 100)),
+        "source_modified_at": (source_modified_at
+                               if source_modified_at is not None
+                               else prev.get("source_modified_at", "")) or "",
+        "last_checked_at": (last_checked_at if last_checked_at is not None
+                            else prev.get("last_checked_at", "")) or "",
+        "updated_at": _now(),
+    }
+    row = {c: ("" if row.get(c) is None else str(row.get(c))) for c in schemas.MIS_REPORTS}
+    mask = (df["report_key"].astype(str).str.lower() == rk) if not df.empty else None
+    if mask is not None and mask.any():
+        i = df[mask].index[0]
+        for c, v in row.items():
+            df.loc[i, c] = v
+        action = "updated"
+    else:
+        df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
+        action = "created"
+    _write(_mis_reports_path(), df, schemas.MIS_REPORTS)
+    return action, rk
+
+
+def save_report_fields(report_key, **fields):
+    """Patch a few fields on an existing report row (used to cache last-modified)."""
+    r = get_mis_report(report_key)
+    if not r:
+        return
+    merged = dict(r)
+    merged.update({k: v for k, v in fields.items() if v is not None})
+    save_mis_report(
+        report_key, merged.get("name"), merged.get("source_url"),
+        description=merged.get("description", ""), mis_key=merged.get("mis_key", ""),
+        file_name=merged.get("file_name", ""), active=merged.get("active", "true"),
+        sort_order=merged.get("sort_order", 100),
+        source_modified_at=merged.get("source_modified_at", ""),
+        last_checked_at=merged.get("last_checked_at", ""))
+
+
+def delete_mis_report(report_key):
+    import pandas as pd
+    rk = str(report_key)
+    try:
+        df = _read(_mis_reports_path(), schemas.MIS_REPORTS)
+        if not df.empty:
+            df = df[df["report_key"].astype(str) != rk]
+            _write(_mis_reports_path(), df, schemas.MIS_REPORTS)
+    except Exception:
+        pass
+    try:
+        acc = _read(_mis_report_access_path(), schemas.MIS_REPORT_ACCESS)
+        if not acc.empty:
+            acc = acc[acc["report_key"].astype(str) != rk]
+            _write(_mis_report_access_path(), acc, schemas.MIS_REPORT_ACCESS)
+    except Exception:
+        pass
+
+
+def get_report_access(report_key):
+    import pandas as pd
+    try:
+        df = _read(_mis_report_access_path(), schemas.MIS_REPORT_ACCESS)
+    except Exception:
+        return []
+    if df.empty:
+        return []
+    df = df[df["report_key"].astype(str) == str(report_key)]
+    return df.to_dict("records")
+
+
+def set_report_access(report_key, rules):
+    """Replace ALL access rules for a report. rules = [(principal_type, principal), ...]"""
+    import pandas as pd
+    rk = str(report_key)
+    try:
+        df = _read(_mis_report_access_path(), schemas.MIS_REPORT_ACCESS)
+    except Exception:
+        df = pd.DataFrame(columns=schemas.MIS_REPORT_ACCESS)
+    if not df.empty:
+        df = df[df["report_key"].astype(str) != rk]
+    new = [{"report_key": rk, "principal_type": t, "principal": p} for t, p in rules]
+    out = pd.concat([df, pd.DataFrame(new, columns=schemas.MIS_REPORT_ACCESS)],
+                    ignore_index=True) if new else df
+    _write(_mis_report_access_path(), out, schemas.MIS_REPORT_ACCESS)
+
+
+def can_see_report(user_key, role, login_role, access_rows):
+    """Deny by default: a report with no rules is admin-only."""
+    if str(login_role or "").lower() == "admin":
+        return True
+    roles = {str(r).lower() for r in (role, login_role) if r}
+    for a in access_rows:
+        t = str(a.get("principal_type", "") or "").lower()
+        p = str(a.get("principal", "") or "")
+        if t == "all":
+            return True
+        if t == "role" and p.lower() in roles:
+            return True
+        if t == "user" and p == user_key:
+            return True
+    return False
+
+
+def reports_for_user(user_key, role, login_role):
+    return [r for r in list_mis_reports(active_only=True)
+            if can_see_report(user_key, role, login_role,
+                              get_report_access(r["report_key"]))]
 
 
 def available_roles():
