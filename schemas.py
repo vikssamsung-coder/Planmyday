@@ -24,6 +24,12 @@ MIS_REPORTS = ["report_key", "mis_key", "name", "description", "source_url", "fi
                "active", "sort_order", "source_modified_at", "last_checked_at", "updated_at"]
 MIS_REPORT_ACCESS = ["report_key", "principal_type", "principal"]
 
+# MIS groups — a named set of users an admin can assign reports to at once. A report grants
+# access to a group via a mis_report_access row (principal_type="group", principal=group_key);
+# membership lives in mis_group_members.
+MIS_GROUPS = ["group_key", "name", "description", "created_at", "updated_at"]
+MIS_GROUP_MEMBERS = ["group_key", "user_key"]
+
 # One row per KPI per user per month. achieved_mtd is editable on the Monthly page.
 MONTHLY_TARGETS = [
     "month", "user_key", "role", "kpi_name",

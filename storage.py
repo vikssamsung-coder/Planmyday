@@ -132,7 +132,8 @@ def local_first():
 # (monthly_progress is NOT here: it stays local and is pushed up separately by
 #  sync_daily_progress so the analyst's own views stay fast.)
 NEON_TABLES = {"users_master", "login_log", "content", "dump_types", "mis_types",
-               "report_requests", "mis_reports", "mis_report_access"}
+               "report_requests", "mis_reports", "mis_report_access",
+               "mis_groups", "mis_group_members"}
 
 
 def _pg_for(path):
@@ -955,6 +956,7 @@ def can_see_report(user_key, role, login_role, access_rows):
     if str(login_role or "").lower() == "admin":
         return True
     roles = {str(r).lower() for r in (role, login_role) if r}
+    user_groups = None   # resolved lazily, only if a 'group' rule is actually present
     for a in access_rows:
         t = str(a.get("principal_type", "") or "").lower()
         p = str(a.get("principal", "") or "")
@@ -964,6 +966,11 @@ def can_see_report(user_key, role, login_role, access_rows):
             return True
         if t == "user" and p == user_key:
             return True
+        if t == "group":
+            if user_groups is None:
+                user_groups = set(groups_for_user(user_key))
+            if p in user_groups:
+                return True
     return False
 
 
@@ -971,6 +978,150 @@ def reports_for_user(user_key, role, login_role):
     return [r for r in list_mis_reports(active_only=True)
             if can_see_report(user_key, role, login_role,
                               get_report_access(r["report_key"]))]
+
+
+# ---------------------------------------------------------------- MIS groups
+
+def _mis_groups_path():
+    return os.path.join(_common_dir(), "mis_groups.xlsx")
+
+
+def _mis_group_members_path():
+    return os.path.join(_common_dir(), "mis_group_members.xlsx")
+
+
+def list_mis_groups():
+    """All MIS groups, each as a dict with a live member count."""
+    try:
+        df = _read(_mis_groups_path(), schemas.MIS_GROUPS)
+    except Exception:
+        df = pd.DataFrame(columns=schemas.MIS_GROUPS)
+    out = []
+    for _, r in df.iterrows():
+        gk = str(r.get("group_key", "") or "")
+        if not gk:
+            continue
+        out.append({
+            "group_key": gk,
+            "name": str(r.get("name", "") or gk),
+            "description": str(r.get("description", "") or ""),
+            "members": get_group_members(gk),
+        })
+    out.sort(key=lambda g: g["name"].lower())
+    return out
+
+
+def get_mis_group(group_key):
+    for g in list_mis_groups():
+        if g["group_key"] == group_key:
+            return g
+    return None
+
+
+def save_mis_group(group_key, name, description=""):
+    """Create or rename/redescribe a group. group_key is stable; name/description editable.
+    Returns ('created'|'updated', group_key)."""
+    gk = (group_key or "").strip()
+    if not gk:
+        # derive a key from the name if none given
+        base = "".join(c for c in (name or "group").lower() if c.isalnum() or c == "_") or "group"
+        gk = base
+    try:
+        df = _read(_mis_groups_path(), schemas.MIS_GROUPS)
+    except Exception:
+        df = pd.DataFrame(columns=schemas.MIS_GROUPS)
+    exists = (not df.empty) and (df["group_key"].astype(str) == gk).any()
+    if exists:
+        m = df["group_key"].astype(str) == gk
+        df.loc[m, "name"] = name or gk
+        df.loc[m, "description"] = description or ""
+        df.loc[m, "updated_at"] = _now()
+        action = "updated"
+    else:
+        row = {"group_key": gk, "name": name or gk, "description": description or "",
+               "created_at": _now(), "updated_at": _now()}
+        df = pd.DataFrame([row]) if df.empty else pd.concat(
+            [df, pd.DataFrame([row])], ignore_index=True)
+        action = "created"
+    _write(_mis_groups_path(), df, schemas.MIS_GROUPS)
+    return action, gk
+
+
+def delete_mis_group(group_key):
+    """Remove a group, its membership, and any report-access rules that reference it."""
+    gk = (group_key or "").strip()
+    if not gk:
+        return
+    # 1) the group row
+    try:
+        df = _read(_mis_groups_path(), schemas.MIS_GROUPS)
+        if not df.empty:
+            _write(_mis_groups_path(), df[df["group_key"].astype(str) != gk], schemas.MIS_GROUPS)
+    except Exception:
+        pass
+    # 2) its membership
+    try:
+        md = _read(_mis_group_members_path(), schemas.MIS_GROUP_MEMBERS)
+        if not md.empty:
+            _write(_mis_group_members_path(),
+                   md[md["group_key"].astype(str) != gk], schemas.MIS_GROUP_MEMBERS)
+    except Exception:
+        pass
+    # 3) any access rules pointing at this group
+    try:
+        ad = _read(_mis_report_access_path(), schemas.MIS_REPORT_ACCESS)
+        if not ad.empty:
+            keep = ~((ad["principal_type"].astype(str).str.lower() == "group") &
+                     (ad["principal"].astype(str) == gk))
+            _write(_mis_report_access_path(), ad[keep], schemas.MIS_REPORT_ACCESS)
+    except Exception:
+        pass
+
+
+def get_group_members(group_key):
+    """List of user_keys in a group."""
+    gk = (group_key or "").strip()
+    if not gk:
+        return []
+    try:
+        df = _read(_mis_group_members_path(), schemas.MIS_GROUP_MEMBERS)
+    except Exception:
+        return []
+    if df.empty:
+        return []
+    return sorted(df[df["group_key"].astype(str) == gk]["user_key"].astype(str).tolist())
+
+
+def set_group_members(group_key, user_keys):
+    """Replace the whole membership of a group with user_keys (a single write)."""
+    gk = (group_key or "").strip()
+    if not gk:
+        return 0
+    try:
+        df = _read(_mis_group_members_path(), schemas.MIS_GROUP_MEMBERS)
+    except Exception:
+        df = pd.DataFrame(columns=schemas.MIS_GROUP_MEMBERS)
+    if not df.empty:
+        df = df[df["group_key"].astype(str) != gk]           # drop old membership
+    rows = [{"group_key": gk, "user_key": str(u)} for u in dict.fromkeys(user_keys) if str(u).strip()]
+    if rows:
+        df = pd.concat([df, pd.DataFrame(rows)], ignore_index=True) if not df.empty else pd.DataFrame(rows)
+    _write(_mis_group_members_path(), df, schemas.MIS_GROUP_MEMBERS)
+    return len(rows)
+
+
+def groups_for_user(user_key):
+    """The group_keys a user belongs to (used by can_see_report)."""
+    uk = (user_key or "").strip()
+    if not uk:
+        return []
+    try:
+        df = _read(_mis_group_members_path(), schemas.MIS_GROUP_MEMBERS)
+    except Exception:
+        return []
+    if df.empty:
+        return []
+    return df[df["user_key"].astype(str) == uk]["group_key"].astype(str).tolist()
 
 
 def available_roles():

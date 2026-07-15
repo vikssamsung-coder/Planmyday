@@ -3386,6 +3386,53 @@ def _admin_mis_reports_panel():
         st.error(f"MIS reports module unavailable: {e}")
         return
 
+    # ---- Groups: named sets of users you can assign reports to at once ----
+    with st.expander("👥 Manage groups", expanded=False):
+        st.caption("A group is a named set of users. Assign a report to a group (below) and "
+                   "every member sees it in their MIS & Reports section — desktop and cloud.")
+        groups = storage.list_mis_groups()
+        if groups:
+            for g in groups:
+                gc = st.columns([5, 2])
+                gc[0].markdown(
+                    f"**{g['name']}** &nbsp;<span style='font-size:11px;color:#9AA7B2;'>"
+                    f"`{g['group_key']}`</span>  \n"
+                    f"<span style='font-size:12px;color:#5C6B7A;'>{len(g['members'])} member(s)"
+                    f"</span>", unsafe_allow_html=True)
+                if gc[1].button("Delete", key=f"grp_del_{g['group_key']}"):
+                    storage.delete_mis_group(g["group_key"])
+                    st.rerun()
+            st.divider()
+        st.markdown("**Create or edit a group**")
+        udf2 = storage.get_users()
+        u_all = sorted(udf2["user_key"].astype(str).tolist()) if not udf2.empty else []
+        u_names = (dict(zip(udf2["user_key"].astype(str), udf2["name"].astype(str)))
+                   if not udf2.empty else {})
+        existing = {g["group_key"]: g for g in groups}
+        gk_pick = st.selectbox(
+            "Group", ["➕ New group…"] + [g["group_key"] for g in groups],
+            format_func=lambda k: "➕ New group…" if k == "➕ New group…" else existing[k]["name"],
+            key="grp_pick")
+        is_new = gk_pick == "➕ New group…"
+        cur_g = {} if is_new else existing[gk_pick]
+        gname = st.text_input("Group name", value=cur_g.get("name", ""), key="grp_name")
+        gkey_in = st.text_input(
+            "Group key (id, no spaces)", value=("" if is_new else gk_pick),
+            disabled=not is_new, key="grp_key",
+            help="Stable id; leave blank to auto-derive from the name.")
+        gmembers = st.multiselect("Members", u_all, default=cur_g.get("members", []),
+                                  format_func=lambda u: u_names.get(u, u), key="grp_members")
+        if st.button("💾 Save group", type="primary", key="grp_save"):
+            if not gname.strip():
+                st.warning("Give the group a name.")
+            else:
+                action, gk = storage.save_mis_group(
+                    (gkey_in if is_new else gk_pick), gname.strip())
+                storage.set_group_members(gk, gmembers)
+                st.success(f"Group '{gname}' {action} with {len(gmembers)} member(s).")
+                st.rerun()
+    st.divider()
+
     rows = storage.list_mis_reports(active_only=False)
     if rows:
         hc = st.columns([3, 3, 2, 2])
@@ -3481,6 +3528,8 @@ def _admin_mis_reports_panel():
                      if str(a.get("principal_type", "")).lower() == "role"]
         cur_users = [a["principal"] for a in acc
                      if str(a.get("principal_type", "")).lower() == "user"]
+        cur_groups = [a["principal"] for a in acc
+                      if str(a.get("principal_type", "")).lower() == "group"]
 
         everyone = st.checkbox("Visible to everyone", value=has_all, key="mrz_all")
         udf = storage.get_users()
@@ -3490,9 +3539,16 @@ def _admin_mis_reports_panel():
         all_users = sorted(udf["user_key"].astype(str).tolist()) if not udf.empty else []
         unames = dict(zip(udf["user_key"].astype(str), udf["name"].astype(str))) \
             if not udf.empty else {}
+        _grps = storage.list_mis_groups()
+        gnames = {g["group_key"]: g["name"] for g in _grps}
+        all_groups = [g["group_key"] for g in _grps]
 
-        sel_roles, sel_users = [], []
+        sel_roles, sel_users, sel_groups = [], [], []
         if not everyone:
+            sel_groups = st.multiselect(
+                "Groups", all_groups,
+                default=[g for g in cur_groups if g in all_groups],
+                format_func=lambda g: gnames.get(g, g), key="mrz_groups")
             sel_roles = st.multiselect("Roles", all_roles,
                                        default=[r for r in cur_roles if r in all_roles],
                                        key="mrz_roles")
@@ -3502,7 +3558,9 @@ def _admin_mis_reports_panel():
                                        key="mrz_users")
         if st.button("Save visibility", key="mrz_vis"):
             rules = [("all", "*")] if everyone else (
-                [("role", r) for r in sel_roles] + [("user", u) for u in sel_users])
+                [("group", g) for g in sel_groups]
+                + [("role", r) for r in sel_roles]
+                + [("user", u) for u in sel_users])
             storage.set_report_access(editing, rules)
             st.success("Visibility updated.")
             st.rerun()
